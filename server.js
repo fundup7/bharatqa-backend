@@ -1,0 +1,344 @@
+require('dotenv').config();
+
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+
+const db = require('./db');
+const storage = require('./storage');
+const { analyzeBugReport } = require('./ai-analyzer-cloud');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Temp folder for uploads before sending to Supabase
+const tempDir = path.join(__dirname, 'temp-uploads');
+if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } });
+
+// ============================================
+// COMPANY ENDPOINTS
+// ============================================
+
+app.post('/api/tests', upload.single('apk'), async (req, res) => {
+    try {
+        const { company_name, app_name, instructions } = req.body;
+        if (!company_name || !app_name || !instructions) {
+            return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
+        }
+
+        let apk_file_url = null, apk_file_path = null;
+
+        if (req.file) {
+            const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
+            apk_file_url = result.url;
+            apk_file_path = result.path;
+            fs.unlinkSync(req.file.path);
+        }
+
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions) 
+                        VALUES ($1, $2, $3, $4, $5) RETURNING id`;
+        const result = await db.query(query, [company_name, app_name, apk_file_url, apk_file_path, instructions]);
+
+        res.json({ id: result.rows[0].id, message: 'Test created!' });
+
+    } catch (err) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/tests', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM tests ORDER BY created_at DESC');
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/tests/:id', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM tests WHERE id = $1', [req.params.id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+        res.json(result.rows[0]);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/tests/:id', async (req, res) => {
+    try {
+        const testId = req.params.id;
+
+        // Get files to delete
+        const test = await db.query('SELECT apk_file_path FROM tests WHERE id = $1', [testId]);
+        const bugs = await db.query('SELECT recording_path, screenshot_paths FROM bugs WHERE test_id = $1', [testId]);
+        const frames = await db.query(
+            'SELECT frame_path FROM ai_frames WHERE bug_id IN (SELECT id FROM bugs WHERE test_id = $1)', [testId]
+        );
+
+        // Delete from Supabase Storage
+        if (test.rows[0]?.apk_file_path) {
+            await storage.deleteFile('apks', test.rows[0].apk_file_path);
+        }
+
+        const recPaths = bugs.rows.filter(b => b.recording_path).map(b => b.recording_path);
+        if (recPaths.length > 0) await storage.deleteFiles('recordings', recPaths);
+
+        const ssPaths = [];
+        bugs.rows.forEach(b => {
+            if (b.screenshot_paths) b.screenshot_paths.split(',').forEach(p => ssPaths.push(p.trim()));
+        });
+        if (ssPaths.length > 0) await storage.deleteFiles('screenshots', ssPaths);
+
+        const framePaths = frames.rows.map(f => f.frame_path);
+        if (framePaths.length > 0) await storage.deleteFiles('ai-frames', framePaths);
+
+        // Delete from database (CASCADE handles bugs + ai_frames)
+        await db.query('DELETE FROM earnings WHERE test_id = $1', [testId]);
+        await db.query('DELETE FROM tests WHERE id = $1', [testId]);
+
+        res.json({ message: 'Test and all data deleted' });
+
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/tests/:id/bugs', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM bugs WHERE test_id = $1 ORDER BY created_at DESC', [req.params.id]);
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/tests/:id/stats', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM test_stats WHERE test_id = $1', [req.params.id]);
+        res.json(result.rows[0] || { total_bugs: 0, total_testers: 0, critical_bugs: 0, high_bugs: 0, medium_bugs: 0, low_bugs: 0, avg_duration: 0 });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/tests/:id/download-apk', async (req, res) => {
+    try {
+        const result = await db.query('SELECT apk_file_url FROM tests WHERE id = $1', [req.params.id]);
+        if (!result.rows[0]?.apk_file_url) return res.status(404).json({ error: 'No APK' });
+        res.redirect(result.rows[0].apk_file_url);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================
+// TESTER ENDPOINTS
+// ============================================
+
+app.get('/api/available-tests', async (req, res) => {
+    try {
+        const result = await db.query("SELECT * FROM tests WHERE status = 'active' ORDER BY created_at DESC");
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/bugs', upload.fields([
+    { name: 'recording', maxCount: 1 },
+    { name: 'screenshots', maxCount: 5 }
+]), async (req, res) => {
+    try {
+        const { test_id, tester_name, bug_title, bug_description, severity,
+            device_info, test_duration, device_stats } = req.body;
+
+        if (!test_id || !tester_name || !bug_title) {
+            return res.status(400).json({ error: 'test_id, tester_name, bug_title required' });
+        }
+
+        const validSev = ['low', 'medium', 'high', 'critical'];
+        const finalSev = validSev.includes(severity) ? severity : 'low';
+
+        // Upload recording
+        let recording_url = null, recording_path = null;
+        if (req.files?.['recording']) {
+            const file = req.files['recording'][0];
+            const result = await storage.uploadFile(file.path, 'recordings', file.originalname);
+            recording_url = result.url;
+            recording_path = result.path;
+            fs.unlinkSync(file.path);
+        }
+
+        // Upload screenshots
+        let screenshots = null, screenshot_paths = null;
+        if (req.files?.['screenshots']) {
+            const urls = [], paths = [];
+            for (const file of req.files['screenshots']) {
+                const result = await storage.uploadFile(file.path, 'screenshots', file.originalname);
+                urls.push(result.url);
+                paths.push(result.path);
+                fs.unlinkSync(file.path);
+            }
+            screenshots = urls.join(',');
+            screenshot_paths = paths.join(',');
+        }
+
+        // Parse device stats
+        let statsJson = null;
+        try { statsJson = device_stats ? JSON.parse(device_stats) : null; } catch (e) { }
+
+        const query = `INSERT INTO bugs (test_id, tester_name, bug_title, bug_description, severity,
+                        device_info, recording_url, recording_path, screenshots, screenshot_paths,
+                        test_duration, device_stats) 
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`;
+
+        const result = await db.query(query, [
+            test_id, tester_name, bug_title, bug_description, finalSev,
+            device_info, recording_url, recording_path, screenshots, screenshot_paths,
+            test_duration || 0, JSON.stringify(statsJson)
+        ]);
+
+        const bugId = result.rows[0].id;
+
+        // Create earnings
+        await db.query('INSERT INTO earnings (tester_name, test_id) VALUES ($1, $2)', [tester_name, test_id]);
+
+        // Auto AI analysis
+        if (recording_url && process.env.GEMINI_API_KEY) {
+            console.log(`🤖 Auto-analysis starting for bug #${bugId}...`);
+            analyzeBugReport(bugId, recording_url, device_stats, bug_description)
+                .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error}`))
+                .catch(e => console.error('Analysis error:', e.message));
+        }
+
+        res.json({ id: bugId, message: 'Bug report submitted!', earned: 50 });
+
+    } catch (err) {
+        if (req.files) Object.values(req.files).flat().forEach(f => {
+            if (fs.existsSync(f.path)) fs.unlinkSync(f.path);
+        });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/bugs/:id', async (req, res) => {
+    try {
+        const bugId = req.params.id;
+        const bug = await db.query('SELECT recording_path, screenshot_paths FROM bugs WHERE id = $1', [bugId]);
+        const frames = await db.query('SELECT frame_path FROM ai_frames WHERE bug_id = $1', [bugId]);
+
+        if (bug.rows[0]?.recording_path) await storage.deleteFile('recordings', bug.rows[0].recording_path);
+        if (bug.rows[0]?.screenshot_paths) {
+            const paths = bug.rows[0].screenshot_paths.split(',').map(p => p.trim());
+            await storage.deleteFiles('screenshots', paths);
+        }
+        if (frames.rows.length > 0) {
+            await storage.deleteFiles('ai-frames', frames.rows.map(f => f.frame_path));
+        }
+
+        await db.query('DELETE FROM bugs WHERE id = $1', [bugId]);
+        res.json({ message: 'Bug deleted' });
+
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================
+// AI ANALYSIS
+// ============================================
+
+app.post('/api/bugs/:id/analyze', async (req, res) => {
+    try {
+        if (!process.env.GEMINI_API_KEY) return res.status(400).json({ error: 'No AI key' });
+
+        const bug = await db.query('SELECT * FROM bugs WHERE id = $1', [req.params.id]);
+        if (bug.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+        if (!bug.rows[0].recording_url) return res.status(400).json({ error: 'No video' });
+        if (bug.rows[0].ai_analysis) return res.json({ success: true, analysis: bug.rows[0].ai_analysis, cached: true });
+
+        res.json({ success: true, message: 'Analysis started. Refresh in 30-60s.' });
+
+        const b = bug.rows[0];
+        analyzeBugReport(b.id, b.recording_url, JSON.stringify(b.device_stats), b.bug_description)
+            .catch(e => console.error('Analysis error:', e.message));
+
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/bugs/:id/analysis', async (req, res) => {
+    try {
+        const result = await db.query('SELECT ai_analysis FROM bugs WHERE id = $1', [req.params.id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+        if (result.rows[0].ai_analysis) res.json({ success: true, analysis: result.rows[0].ai_analysis });
+        else res.json({ success: false, message: 'Not analyzed yet' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/bugs/:id/frames', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM ai_frames WHERE bug_id = $1 ORDER BY frame_number', [req.params.id]);
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================
+// EARNINGS
+// ============================================
+
+app.get('/api/earnings/:tester_name', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT e.*, t.app_name, t.company_name FROM earnings e 
+             LEFT JOIN tests t ON e.test_id = t.id 
+             WHERE e.tester_name = $1 ORDER BY e.created_at DESC`,
+            [req.params.tester_name]
+        );
+        const total = result.rows.reduce((s, r) => s + parseFloat(r.amount), 0);
+        const pending = result.rows.filter(r => r.status === 'pending').reduce((s, r) => s + parseFloat(r.amount), 0);
+        res.json({ total_earned: total, pending_amount: pending, tests_completed: result.rows.length, earnings: result.rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================
+// ADMIN
+// ============================================
+
+app.get('/api/admin/stats', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM admin_overview');
+        const stats = result.rows[0] || {};
+        stats.ai_enabled = !!process.env.GEMINI_API_KEY;
+        res.json(stats);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/admin/all-bugs', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT b.*, t.app_name, t.company_name FROM bugs b 
+             LEFT JOIN tests t ON b.test_id = t.id ORDER BY b.created_at DESC`
+        );
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/health', async (req, res) => {
+    let dbOk = false;
+    try { await db.query('SELECT 1'); dbOk = true; } catch (e) { }
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        database: dbOk ? 'connected' : 'disconnected',
+        ai_enabled: !!process.env.GEMINI_API_KEY,
+        storage: 'supabase'
+    });
+});
+
+// ============================================
+// START
+// ============================================
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log('');
+    console.log('╔═══════════════════════════════════════╗');
+    console.log('║      BharatQA Cloud Backend ☁️         ║');
+    console.log('╠═══════════════════════════════════════╣');
+    console.log(`║  Port:    ${PORT}                            ║`);
+    console.log(`║  DB:      ${process.env.DATABASE_URL ? '🟢 Supabase' : '🔴 Not set'}               ║`);
+    console.log(`║  Storage: ${process.env.SUPABASE_URL ? '🟢 Supabase' : '🔴 Not set'}               ║`);
+    console.log(`║  AI:      ${process.env.GEMINI_API_KEY ? '🟢 Gemini' : '🔴 No key'}                ║`);
+    console.log('╚═══════════════════════════════════════╝');
+    console.log('');
+});

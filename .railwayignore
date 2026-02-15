@@ -1,0 +1,5 @@
+android-app
+frontend
+*.gradle
+gradlew
+gradlew.bat
