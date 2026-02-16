@@ -51,6 +51,92 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
     }
 });
 
+// ============================================
+// AUTH ENDPOINTS
+// ============================================
+
+// Google Sign In — verify token and create/login company
+app.post('/api/auth/google', async (req, res) => {
+    try {
+        const { credential } = req.body;
+
+        if (!credential) {
+            return res.status(400).json({ error: 'No credential provided' });
+        }
+
+        // Decode Google JWT token (it's base64 encoded)
+        const parts = credential.split('.');
+        if (parts.length !== 3) {
+            return res.status(400).json({ error: 'Invalid token format' });
+        }
+
+        // Decode payload (middle part)
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+
+        const { sub: googleId, email, name, picture } = payload;
+
+        if (!googleId || !email) {
+            return res.status(400).json({ error: 'Invalid token data' });
+        }
+
+        // Check if company already exists
+        const existing = await db.query(
+            'SELECT * FROM companies WHERE google_id = $1',
+            [googleId]
+        );
+
+        let company;
+
+        if (existing.rows.length > 0) {
+            // Existing company — update last login
+            await db.query(
+                'UPDATE companies SET last_login = NOW(), name = $1, picture = $2 WHERE google_id = $3',
+                [name, picture, googleId]
+            );
+            company = existing.rows[0];
+            company.name = name;
+            company.picture = picture;
+            console.log(`🔑 Company logged in: ${email}`);
+        } else {
+            // New company — create account
+            const result = await db.query(
+                'INSERT INTO companies (google_id, email, name, picture) VALUES ($1, $2, $3, $4) RETURNING *',
+                [googleId, email, name, picture]
+            );
+            company = result.rows[0];
+            console.log(`🆕 New company registered: ${email}`);
+        }
+
+        res.json({
+            success: true,
+            company: {
+                id: company.id,
+                email: company.email,
+                name: company.name,
+                picture: company.picture
+            }
+        });
+
+    } catch (err) {
+        console.error('Auth error:', err.message);
+        res.status(500).json({ error: 'Authentication failed: ' + err.message });
+    }
+});
+
+// Get company profile
+app.get('/api/auth/profile/:companyId', async (req, res) => {
+    try {
+        const result = await db.query(
+            'SELECT id, email, name, picture, created_at FROM companies WHERE id = $1',
+            [req.params.companyId]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Company not found' });
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/tests', async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM tests ORDER BY created_at DESC');
