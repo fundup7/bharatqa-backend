@@ -57,7 +57,6 @@ function fixBinaryPermissions() {
 
 fixBinaryPermissions();
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
