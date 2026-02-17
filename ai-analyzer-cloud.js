@@ -4,10 +4,29 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
-const { execSync } = require('child_process');
 
 const db = require('./db');
 const storage = require('./storage');
+
+// ========================================
+// FFMPEG SETUP - Works on Render
+// ========================================
+try {
+  const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+  const ffprobePath = require('@ffprobe-installer/ffprobe').path;
+  
+  ffmpeg.setFfmpegPath(ffmpegPath);
+  ffmpeg.setFfprobePath(ffprobePath);
+  
+  console.log('✅ ffmpeg:', ffmpegPath);
+  console.log('✅ ffprobe:', ffprobePath);
+} catch (e) {
+  console.error('❌ ffmpeg/ffprobe setup failed:', e.message);
+}
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+// ... rest of the file stays exactly the same ...
 
 // ========================================
 // FIX PERMISSIONS ON STARTUP
