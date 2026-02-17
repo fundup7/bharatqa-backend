@@ -23,32 +23,51 @@ const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } }
 // COMPANY ENDPOINTS
 // ============================================
 
+// ============================================
+// COMPANY ENDPOINTS
+// ============================================
+
+// Create test (linked to company)
 app.post('/api/tests', upload.single('apk'), async (req, res) => {
-    try {
-        const { company_name, app_name, instructions } = req.body;
-        if (!company_name || !app_name || !instructions) {
-            return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
-        }
+  try {
+    const { company_name, app_name, instructions, company_id } = req.body;
 
-        let apk_file_url = null, apk_file_path = null;
+    // DEBUG: Log what we receive
+    console.log('📦 req.body:', req.body);
+    console.log('📦 company_id:', company_id, 'type:', typeof company_id);
 
-        if (req.file) {
-            const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
-            apk_file_url = result.url;
-            apk_file_path = result.path;
-            fs.unlinkSync(req.file.path);
-        }
-
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions) 
-                        VALUES ($1, $2, $3, $4, $5) RETURNING id`;
-        const result = await db.query(query, [company_name, app_name, apk_file_url, apk_file_path, instructions]);
-
-        res.json({ id: result.rows[0].id, message: 'Test created!' });
-
-    } catch (err) {
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        res.status(500).json({ error: err.message });
+    if (!company_name || !app_name || !instructions) {
+      return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
     }
+
+    if (!company_id) {
+      return res.status(400).json({ error: 'company_id is required' });
+    }
+
+    let apk_file_url = null, apk_file_path = null;
+
+    if (req.file) {
+      const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
+      apk_file_url = result.url;
+      apk_file_path = result.path;
+      fs.unlinkSync(req.file.path);
+    }
+
+    const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id) 
+                   VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`;
+    const result = await db.query(query, [
+      company_name, app_name, apk_file_url, apk_file_path, instructions,
+      parseInt(company_id)  // ← Force integer, not string
+    ]);
+
+    console.log('✅ Test created with company_id:', parseInt(company_id));
+    res.json({ id: result.rows[0].id, message: 'Test created!' });
+
+  } catch (err) {
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    console.error('❌ Test creation error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ============================================
