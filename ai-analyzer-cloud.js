@@ -193,7 +193,7 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
     if (raw.length === 0) {
       console.log('⚠️ No frames extracted, trying text-only analysis...');
       
-      const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+      const models = ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-1.5-flash-latest'];
       let analysis = null, usedModel = null;
 
       for (const modelName of models) {
