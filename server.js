@@ -343,94 +343,106 @@ app.delete('/api/auth/company/:companyId', async (req, res) => {
 // ============================================
 
 // Register new tester
+// Register or Login tester (with Google support)
 app.post('/api/testers/register', async (req, res) => {
-  try {
-    const { 
-      full_name, phone, upi_id, device_model, 
-      android_version, screen_resolution,
-      latitude, longitude, city, state, full_address 
-    } = req.body;
+    try {
+        const {
+            full_name, phone, upi_id, 
+            google_id, email, profile_picture, // New fields
+            device_model, android_version, screen_resolution,
+            latitude, longitude, city, state, full_address
+        } = req.body;
 
-    if (!full_name || !phone) {
-      return res.status(400).json({ 
-        error: 'Full name and phone number are required' 
-      });
+        // We need at least a phone number OR a google_id to proceed
+        if (!phone && !google_id) {
+            return res.status(400).json({ error: 'Phone number or Google ID required' });
+        }
+
+        const phoneClean = phone ? phone.replace(/\D/g, '') : null;
+
+        // 1. Try to find existing user by Google ID or Phone
+        let existing = null;
+        
+        if (google_id) {
+            const r = await db.query('SELECT * FROM testers WHERE google_id = $1', [google_id]);
+            if (r.rows.length > 0) existing = r.rows[0];
+        }
+        
+        if (!existing && phoneClean) {
+            const r = await db.query('SELECT * FROM testers WHERE phone = $1', [phoneClean]);
+            if (r.rows.length > 0) existing = r.rows[0];
+        }
+
+        let tester;
+
+        if (existing) {
+            // UPDATE existing user
+            const result = await db.query(
+                `UPDATE testers SET 
+                full_name = COALESCE($1, full_name), 
+                upi_id = COALESCE($2, upi_id),
+                google_id = COALESCE($3, google_id),
+                email = COALESCE($4, email),
+                profile_picture = COALESCE($5, profile_picture),
+                device_model = COALESCE($6, device_model),
+                android_version = COALESCE($7, android_version),
+                screen_resolution = COALESCE($8, screen_resolution),
+                latitude = COALESCE($9, latitude),
+                longitude = COALESCE($10, longitude),
+                city = COALESCE($11, city),
+                state = COALESCE($12, state),
+                full_address = COALESCE($13, full_address),
+                phone = COALESCE($14, phone),
+                last_active = NOW()
+                WHERE id = $15 RETURNING *`,
+                [
+                    full_name, upi_id, google_id, email, profile_picture,
+                    device_model, android_version, screen_resolution,
+                    latitude, longitude, city, state, full_address,
+                    phoneClean, existing.id
+                ]
+            );
+            tester = result.rows[0];
+            console.log(`✅ Tester updated: ${tester.full_name}`);
+        } else {
+            // INSERT new user
+            const result = await db.query(
+                `INSERT INTO testers (
+                    full_name, phone, upi_id, google_id, email, profile_picture,
+                    device_model, android_version, screen_resolution,
+                    latitude, longitude, city, state, full_address
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
+                RETURNING *`,
+                [
+                    full_name, phoneClean, upi_id, google_id, email, profile_picture,
+                    device_model, android_version, screen_resolution,
+                    latitude || 0, longitude || 0, city || 'Unknown', 
+                    state || 'Unknown', full_address || 'Unknown'
+                ]
+            );
+            tester = result.rows[0];
+            console.log(`✨ New tester registered: ${tester.full_name}`);
+        }
+
+        res.json({
+            success: true,
+            tester: {
+                id: tester.id,
+                full_name: tester.full_name,
+                phone: tester.phone,
+                email: tester.email,
+                google_id: tester.google_id,
+                profile_picture: tester.profile_picture,
+                upi_id: tester.upi_id,
+                total_tests: tester.total_tests || 0,
+                total_earnings: tester.total_earnings || 0
+            }
+        });
+
+    } catch (err) {
+        console.error('Tester register error:', err.message);
+        res.status(500).json({ error: err.message });
     }
-
-    // Clean phone number
-    const phoneClean = phone.replace(/\D/g, '');
-    if (phoneClean.length < 10) {
-      return res.status(400).json({ 
-        error: 'Please enter a valid 10-digit phone number' 
-      });
-    }
-
-    // Check if tester already exists
-    const existing = await db.query(
-      'SELECT * FROM testers WHERE phone = $1', 
-      [phoneClean]
-    );
-
-    let tester;
-
-    if (existing.rows.length > 0) {
-      // Existing tester — update info
-      const result = await db.query(
-        `UPDATE testers SET 
-          full_name = $1, upi_id = $2, device_model = $3,
-          android_version = $4, screen_resolution = $5,
-          latitude = $6, longitude = $7, city = $8, 
-          state = $9, full_address = $10, last_active = NOW()
-        WHERE phone = $11 RETURNING *`,
-        [full_name, upi_id || null, device_model || null, 
-         android_version || null, screen_resolution || null,
-         latitude || 0, longitude || 0, city || 'Unknown', 
-         state || 'Unknown', full_address || 'Unknown', phoneClean]
-      );
-      tester = result.rows[0];
-      console.log(`✅ Tester logged in: ${full_name} (${phoneClean})`);
-    } else {
-      // New tester
-      const result = await db.query(
-        `INSERT INTO testers (
-          full_name, phone, upi_id, device_model, 
-          android_version, screen_resolution,
-          latitude, longitude, city, state, full_address
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
-        RETURNING *`,
-        [full_name, phoneClean, upi_id || null, device_model || null,
-         android_version || null, screen_resolution || null,
-         latitude || 0, longitude || 0, city || 'Unknown',
-         state || 'Unknown', full_address || 'Unknown']
-      );
-      tester = result.rows[0];
-      console.log(`🎉 New tester registered: ${full_name} (${phoneClean})`);
-    }
-
-    res.json({
-      success: true,
-      tester: {
-        id: tester.id,
-        full_name: tester.full_name,
-        phone: tester.phone,
-        upi_id: tester.upi_id,
-        device_model: tester.device_model,
-        city: tester.city,
-        state: tester.state,
-        total_tests: tester.total_tests,
-        total_earnings: tester.total_earnings
-      }
-    });
-
-  } catch (err) {
-    console.error('Tester register error:', err.message);
-    if (err.code === '23505') {
-      return res.status(409).json({ 
-        error: 'Phone number already registered' 
-      });
-    }
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Get tester profile
@@ -492,20 +504,17 @@ app.put('/api/testers/:testerId/location', async (req, res) => {
 });
 
 // GET /api/testers/google/:googleId
-router.get('/testers/google/:googleId', async (req, res) => {
+app.get('/api/testers/google/:googleId', async (req, res) => {
     try {
         const { googleId } = req.params;
-        const { data, error } = await supabase
-            .from('testers')
-            .select('*')
-            .eq('google_id', googleId)
-            .single();
+        // Use db.query, NOT supabase.from
+        const result = await db.query('SELECT * FROM testers WHERE google_id = $1', [googleId]);
 
-        if (error || !data) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ success: false, message: 'Tester not found' });
         }
 
-        res.json({ success: true, tester: data });
+        res.json({ success: true, tester: result.rows[0] });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
