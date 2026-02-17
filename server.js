@@ -236,6 +236,108 @@ app.get('/api/tests/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ============================================
+// SETTINGS ENDPOINTS
+// ============================================
+
+// Get full company profile
+app.get('/api/auth/company/:companyId', async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, email, name, picture, company_name, industry, 
+       company_size, role, phone, website, referral_source,
+       onboarding_complete, created_at, last_login
+       FROM companies WHERE id = $1`,
+      [req.params.companyId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update company profile (settings)
+app.put('/api/auth/company/:companyId', async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { 
+      company_name, industry, company_size, 
+      role, phone, website, referral_source 
+    } = req.body;
+
+    if (!company_name || !industry || !company_size || !role || !phone) {
+      return res.status(400).json({ 
+        error: 'Please fill all required fields' 
+      });
+    }
+
+    const phoneClean = phone.replace(/\D/g, '');
+    if (phoneClean.length < 10) {
+      return res.status(400).json({ 
+        error: 'Please enter a valid 10-digit phone number' 
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE companies SET 
+        company_name = $1, industry = $2, company_size = $3,
+        role = $4, phone = $5, website = $6, referral_source = $7
+       WHERE id = $8 RETURNING *`,
+      [company_name, industry, company_size, role, 
+       phoneClean, website || null, referral_source || null, companyId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    console.log(`✅ Profile updated: ${company_name}`);
+    res.json({ 
+      success: true, 
+      company: result.rows[0] 
+    });
+
+  } catch (err) {
+    console.error('Settings update error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete company account
+app.delete('/api/auth/company/:companyId', async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    
+    // Delete all tests owned by this company first
+    await db.query(
+      'DELETE FROM tests WHERE company_id = $1', 
+      [companyId]
+    );
+    
+    // Delete the company
+    const result = await db.query(
+      'DELETE FROM companies WHERE id = $1 RETURNING email', 
+      [companyId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    console.log(`🗑️ Account deleted: ${result.rows[0].email}`);
+    res.json({ success: true, message: 'Account deleted' });
+
+  } catch (err) {
+    console.error('Delete account error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/tests/:id', async (req, res) => {
     try {
         const testId = req.params.id;
@@ -294,6 +396,7 @@ app.get('/api/tests/:id/download-apk', async (req, res) => {
         res.redirect(result.rows[0].apk_file_url);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 
 // ============================================
 // TESTER ENDPOINTS
