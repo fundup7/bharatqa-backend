@@ -1,4 +1,36 @@
 require('dotenv').config();
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process'); // ← Add this
+
+// Fix ffprobe permissions on Render
+try {
+  const ffprobePath = path.join(__dirname, 'node_modules', 'ffprobe-static', 'bin', 'linux', 'x64', 'ffprobe');
+  if (fs.existsSync(ffprobePath)) {
+    execSync(`chmod +x "${ffprobePath}"`);
+    console.log('✅ ffprobe permissions fixed');
+  }
+} catch (e) {
+  console.log('⚠️ ffprobe chmod skipped:', e.message);
+}
+
+// Also fix ffmpeg if you use it
+try {
+  const ffmpegPath = path.join(__dirname, 'node_modules', 'ffmpeg-static', 'ffmpeg');
+  if (fs.existsSync(ffmpegPath)) {
+    execSync(`chmod +x "${ffmpegPath}"`);
+    console.log('✅ ffmpeg permissions fixed');
+  }
+} catch (e) {
+  console.log('⚠️ ffmpeg chmod skipped:', e.message);
+}
+
+const db = require('./db');
+const storage = require('./storage');
+// ... rest of your code
 
 const express = require('express');
 const multer = require('multer');
