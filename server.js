@@ -338,6 +338,179 @@ app.delete('/api/auth/company/:companyId', async (req, res) => {
   }
 });
 
+// ============================================
+// TESTER ENDPOINTS
+// ============================================
+
+// Register new tester
+app.post('/api/testers/register', async (req, res) => {
+  try {
+    const { 
+      full_name, phone, upi_id, device_model, 
+      android_version, screen_resolution,
+      latitude, longitude, city, state, full_address 
+    } = req.body;
+
+    if (!full_name || !phone) {
+      return res.status(400).json({ 
+        error: 'Full name and phone number are required' 
+      });
+    }
+
+    // Clean phone number
+    const phoneClean = phone.replace(/\D/g, '');
+    if (phoneClean.length < 10) {
+      return res.status(400).json({ 
+        error: 'Please enter a valid 10-digit phone number' 
+      });
+    }
+
+    // Check if tester already exists
+    const existing = await db.query(
+      'SELECT * FROM testers WHERE phone = $1', 
+      [phoneClean]
+    );
+
+    let tester;
+
+    if (existing.rows.length > 0) {
+      // Existing tester — update info
+      const result = await db.query(
+        `UPDATE testers SET 
+          full_name = $1, upi_id = $2, device_model = $3,
+          android_version = $4, screen_resolution = $5,
+          latitude = $6, longitude = $7, city = $8, 
+          state = $9, full_address = $10, last_active = NOW()
+        WHERE phone = $11 RETURNING *`,
+        [full_name, upi_id || null, device_model || null, 
+         android_version || null, screen_resolution || null,
+         latitude || 0, longitude || 0, city || 'Unknown', 
+         state || 'Unknown', full_address || 'Unknown', phoneClean]
+      );
+      tester = result.rows[0];
+      console.log(`✅ Tester logged in: ${full_name} (${phoneClean})`);
+    } else {
+      // New tester
+      const result = await db.query(
+        `INSERT INTO testers (
+          full_name, phone, upi_id, device_model, 
+          android_version, screen_resolution,
+          latitude, longitude, city, state, full_address
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+        RETURNING *`,
+        [full_name, phoneClean, upi_id || null, device_model || null,
+         android_version || null, screen_resolution || null,
+         latitude || 0, longitude || 0, city || 'Unknown',
+         state || 'Unknown', full_address || 'Unknown']
+      );
+      tester = result.rows[0];
+      console.log(`🎉 New tester registered: ${full_name} (${phoneClean})`);
+    }
+
+    res.json({
+      success: true,
+      tester: {
+        id: tester.id,
+        full_name: tester.full_name,
+        phone: tester.phone,
+        upi_id: tester.upi_id,
+        device_model: tester.device_model,
+        city: tester.city,
+        state: tester.state,
+        total_tests: tester.total_tests,
+        total_earnings: tester.total_earnings
+      }
+    });
+
+  } catch (err) {
+    console.error('Tester register error:', err.message);
+    if (err.code === '23505') {
+      return res.status(409).json({ 
+        error: 'Phone number already registered' 
+      });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get tester profile
+app.get('/api/testers/:testerId', async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM testers WHERE id = $1', 
+      [req.params.testerId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Tester not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update tester UPI
+app.put('/api/testers/:testerId/upi', async (req, res) => {
+  try {
+    const { upi_id } = req.body;
+    if (!upi_id) {
+      return res.status(400).json({ error: 'UPI ID is required' });
+    }
+    
+    const result = await db.query(
+      'UPDATE testers SET upi_id = $1 WHERE id = $2 RETURNING *',
+      [upi_id, req.params.testerId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Tester not found' });
+    }
+    
+    res.json({ success: true, tester: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update tester location (called on each test)
+app.put('/api/testers/:testerId/location', async (req, res) => {
+  try {
+    const { latitude, longitude, city, state, full_address } = req.body;
+    await db.query(
+      `UPDATE testers SET 
+        latitude = $1, longitude = $2, city = $3, 
+        state = $4, full_address = $5, last_active = NOW()
+      WHERE id = $6`,
+      [latitude || 0, longitude || 0, city || 'Unknown', 
+       state || 'Unknown', full_address || 'Unknown', 
+       req.params.testerId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/testers/google/:googleId
+router.get('/testers/google/:googleId', async (req, res) => {
+    try {
+        const { googleId } = req.params;
+        const { data, error } = await supabase
+            .from('testers')
+            .select('*')
+            .eq('google_id', googleId)
+            .single();
+
+        if (error || !data) {
+            return res.status(404).json({ success: false, message: 'Tester not found' });
+        }
+
+        res.json({ success: true, tester: data });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 app.delete('/api/tests/:id', async (req, res) => {
     try {
         const testId = req.params.id;
