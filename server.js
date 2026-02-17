@@ -30,16 +30,6 @@ try {
 
 const db = require('./db');
 const storage = require('./storage');
-// ... rest of your code
-
-const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-
-const db = require('./db');
-const storage = require('./storage');
 const { analyzeBugReport } = require('./ai-analyzer-cloud');
 
 const app = express();
