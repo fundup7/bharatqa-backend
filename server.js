@@ -107,20 +107,65 @@ app.post('/api/auth/google', async (req, res) => {
             console.log(`🆕 New company registered: ${email}`);
         }
 
-        res.json({
-            success: true,
-            company: {
-                id: company.id,
-                email: company.email,
-                name: company.name,
-                picture: company.picture
-            }
-        });
+        // In the res.json at the end of /api/auth/google
+res.json({
+  success: true,
+  company: {
+    id: company.id,
+    email: company.email,
+    name: company.name,
+    picture: company.picture,
+    company_name: company.company_name,
+    industry: company.industry,
+    onboarding_complete: company.onboarding_complete || false
+  }
+});
 
     } catch (err) {
         console.error('Auth error:', err.message);
         res.status(500).json({ error: 'Authentication failed: ' + err.message });
     }
+});
+
+// Complete company onboarding profile
+app.put('/api/auth/onboarding/:companyId', async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const { 
+      company_name, industry, company_size, 
+      role, phone, website, referral_source 
+    } = req.body;
+
+    if (!company_name || !industry || !company_size || !role || !phone) {
+      return res.status(400).json({ 
+        error: 'Please fill all required fields' 
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE companies SET 
+        company_name = $1, industry = $2, company_size = $3,
+        role = $4, phone = $5, website = $6, referral_source = $7,
+        onboarding_complete = TRUE
+      WHERE id = $8 RETURNING *`,
+      [company_name, industry, company_size, role, phone, 
+       website || null, referral_source || null, companyId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    console.log(`✅ Onboarding complete: ${company_name}`);
+    res.json({ 
+      success: true, 
+      company: result.rows[0] 
+    });
+
+  } catch (err) {
+    console.error('Onboarding error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get company profile
@@ -137,11 +182,50 @@ app.get('/api/auth/profile/:companyId', async (req, res) => {
     }
 });
 
-app.get('/api/tests', async (req, res) => {
+// Create test (now linked to company)
+app.post('/api/tests', upload.single('apk'), async (req, res) => {
     try {
-        const result = await db.query('SELECT * FROM tests ORDER BY created_at DESC');
+        const { company_name, app_name, instructions, company_id } = req.body;
+
+        if (!company_name || !app_name || !instructions) {
+            return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
+        }
+
+        let apk_file_url = null, apk_file_path = null;
+
+        if (req.file) {
+            const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
+            apk_file_url = result.url;
+            apk_file_path = result.path;
+            fs.unlinkSync(req.file.path);
+        }
+
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id) 
+                        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`;
+        const result = await db.query(query, [
+            company_name, app_name, apk_file_url, apk_file_path, instructions,
+            company_id || null
+        ]);
+
+        res.json({ id: result.rows[0].id, message: 'Test created!' });
+
+    } catch (err) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get tests for a specific company
+app.get('/api/company/:companyId/tests', async (req, res) => {
+    try {
+        const result = await db.query(
+            'SELECT * FROM tests WHERE company_id = $1 ORDER BY created_at DESC',
+            [req.params.companyId]
+        );
         res.json(result.rows);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/tests/:id', async (req, res) => {
