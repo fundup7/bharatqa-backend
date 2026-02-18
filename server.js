@@ -638,7 +638,7 @@ app.post('/api/bugs', upload.fields([
 ]), async (req, res) => {
     try {
         const { test_id, tester_name, bug_title, bug_description, severity,
-            device_info, test_duration, device_stats } = req.body;
+            device_info, test_duration, device_stats, tester_google_id } = req.body;
 
         if (!test_id || !tester_name || !bug_title) {
             return res.status(400).json({ error: 'test_id, tester_name, bug_title required' });
@@ -691,15 +691,33 @@ app.post('/api/bugs', upload.fields([
         // Create earnings
         await db.query('INSERT INTO earnings (tester_name, test_id) VALUES ($1, $2)', [tester_name, test_id]);
 
-        // Auto AI analysis
+        // ✅ Update tester stats BEFORE sending response
+        if (tester_google_id) {
+            try {
+                await db.query(`
+                    UPDATE testers 
+                    SET total_tests = total_tests + 1,
+                        total_earnings = total_earnings + 50,
+                        last_active = NOW()
+                    WHERE google_id = $1
+                `, [tester_google_id]);
+                console.log(`✅ Updated stats for tester: ${tester_google_id}`);
+            } catch (statsErr) {
+                console.error(`⚠️ Failed to update tester stats: ${statsErr.message}`);
+                // Don't fail the whole request — bug was already saved
+            }
+        }
+
+        // ✅ Send response AFTER all DB operations
+        res.json({ id: bugId, message: 'Bug report submitted!', earned: 50 });
+
+        // Auto AI analysis (fire-and-forget AFTER response)
         if (recording_url && process.env.GEMINI_API_KEY) {
             console.log(`🤖 Auto-analysis starting for bug #${bugId}...`);
             analyzeBugReport(bugId, recording_url, device_stats, bug_description)
                 .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error}`))
                 .catch(e => console.error('Analysis error:', e.message));
         }
-
-        res.json({ id: bugId, message: 'Bug report submitted!', earned: 50 });
 
     } catch (err) {
         if (req.files) Object.values(req.files).flat().forEach(f => {
@@ -708,7 +726,6 @@ app.post('/api/bugs', upload.fields([
         res.status(500).json({ error: err.message });
     }
 });
-
 app.delete('/api/bugs/:id', async (req, res) => {
     try {
         const bugId = req.params.id;
