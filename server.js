@@ -309,17 +309,43 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
 
 // Get tests for a specific company
 app.get('/api/company/:companyId/tests', async (req, res) => {
-    try {
-        const result = await db.query(
-            'SELECT * FROM tests WHERE company_id = $1 ORDER BY created_at DESC',
-            [req.params.companyId]
-        );
-        res.json(result.rows);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+  try {
+    const companyId = Number(req.params.companyId);
+
+    const sql = `
+      SELECT
+        t.*,
+        (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id) AS bug_count,
+        (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id AND lower(b.severity)='critical') AS critical_count,
+        (SELECT COUNT(DISTINCT b.tester_id)::int
+         FROM bugs b
+         WHERE b.test_id = t.id AND b.tester_id IS NOT NULL) AS tester_count
+      FROM tests t
+      WHERE t.company_id = $1
+      ORDER BY t.created_at DESC;
+    `;
+
+    const result = await db.query(sql, [companyId]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
+app.get('/api/company/:companyId/unique-testers', async (req, res) => {
+  try {
+    const r = await db.query(
+      `SELECT COUNT(DISTINCT b.tester_id) AS unique_testers
+       FROM bugs b
+       JOIN tests t ON t.id = b.test_id
+       WHERE t.company_id = $1 AND b.tester_id IS NOT NULL`,
+      [req.params.companyId]
+    );
+    res.json({ unique_testers: Number(r.rows[0].unique_testers || 0) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 app.get('/api/tests/:id', async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM tests WHERE id = $1', [req.params.id]);
@@ -856,12 +882,18 @@ app.post('/api/bugs', upload.fields([
         // Parse device stats
         let statsJson = null;
         try { statsJson = device_stats ? JSON.parse(device_stats) : null; } catch (e) { }
+		
+	let testerId = null;
+	if (tester_google_id) {
+  	const tr = await db.query('SELECT id FROM testers WHERE google_id = $1', [tester_google_id]);
+	testerId = tr.rows[0]?.id || null;
+	}
 
         const query = `INSERT INTO bugs (
     test_id, tester_name, bug_title, bug_description, severity,
     device_info, recording_url, recording_path, recording_storage,
-    screenshots, screenshot_paths, test_duration, device_stats
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`;
+    screenshots, screenshot_paths, test_duration, device_stats, tester_id
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`;
 
         const result = await db.query(query, [
             test_id, tester_name, bug_title, bug_description, finalSev,
@@ -901,6 +933,8 @@ app.post('/api/bugs', upload.fields([
                 // Don't fail the whole request — bug was already saved
             }
         }
+
+
 
         // ✅ Send response AFTER all DB operations
         res.json({ id: bugId, message: 'Bug report submitted!', earned: 50 });
