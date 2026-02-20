@@ -528,9 +528,9 @@ app.put('/api/testers/:testerId/upi', async (req, res) => {
 // ===== APP VERSION / UPDATE ROUTES =====
 
 // GET /api/app/latest-version — app checks this on launch
-router.get('/app/latest-version', async (req, res) => {
+app.get('/api/app/latest-version', async (req, res) => {
     try {
-        const result = await pool.query(
+        const result = await db.query(
             `SELECT version_code, version_name, apk_url, release_notes, 
                     is_mandatory, min_supported_version
              FROM app_versions 
@@ -565,8 +565,8 @@ router.get('/app/latest-version', async (req, res) => {
     }
 });
 
-// POST /api/app/release — you call this from admin dashboard to push update
-router.post('/app/release', async (req, res) => {
+// POST /api/app/release — push update from admin
+app.post('/api/app/release', async (req, res) => {
     try {
         const { version_code, version_name, apk_url, release_notes, is_mandatory, min_supported_version } = req.body;
 
@@ -574,11 +574,11 @@ router.post('/app/release', async (req, res) => {
             return res.status(400).json({ success: false, error: 'version_code, version_name, apk_url required' });
         }
 
-        // Deactivate old versions
-        await pool.query('UPDATE app_versions SET is_active = false');
+        await db.query('UPDATE app_versions SET is_active = false');
 
-        const result = await pool.query(
-            `INSERT INTO app_versions (version_code, version_name, apk_url, release_notes, is_mandatory, min_supported_version, is_active)
+        const result = await db.query(
+            `INSERT INTO app_versions (version_code, version_name, apk_url, release_notes, 
+             is_mandatory, min_supported_version, is_active)
              VALUES ($1, $2, $3, $4, $5, $6, true)
              RETURNING *`,
             [
@@ -598,12 +598,12 @@ router.post('/app/release', async (req, res) => {
     }
 });
 
-// GET /api/app/check-update/:currentVersionCode — detailed check
-router.get('/app/check-update/:currentVersionCode', async (req, res) => {
+// GET /api/app/check-update/:currentVersionCode
+app.get('/api/app/check-update/:currentVersionCode', async (req, res) => {
     try {
         const currentVersion = parseInt(req.params.currentVersionCode);
 
-        const result = await pool.query(
+        const result = await db.query(
             `SELECT version_code, version_name, apk_url, release_notes, 
                     is_mandatory, min_supported_version
              FROM app_versions 
@@ -640,7 +640,6 @@ router.get('/app/check-update/:currentVersionCode', async (req, res) => {
         res.status(500).json({ success: false, error: 'Failed to check update' });
     }
 });
-
 // Update tester location (called on each test)
 app.put('/api/testers/:testerId/location', async (req, res) => {
   try {
