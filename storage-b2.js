@@ -20,24 +20,37 @@ const b2Client = new S3Client({
 
 const BUCKET = process.env.B2_BUCKET_NAME || 'bharatqa-recordings';
 
-// Upload video to B2
 async function uploadVideo(filePath, originalName) {
     try {
         const timestamp = Date.now();
         const ext = path.extname(originalName) || '.mp4';
         const key = `recordings/${timestamp}_${Math.random().toString(36).slice(2, 8)}${ext}`;
 
-        const fileBuffer = fs.readFileSync(filePath);
-        const fileSizeMB = (fileBuffer.length / 1024 / 1024).toFixed(1);
+        // Check file exists and has content
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${filePath}`);
+        }
+
+        const fileStats = fs.statSync(filePath);
+        const fileSizeMB = (fileStats.size / 1024 / 1024).toFixed(1);
+
+        if (fileStats.size === 0) {
+            throw new Error('File is empty (0 bytes)');
+        }
+
+        console.log(`📹 Uploading to B2: ${fileSizeMB} MB from ${filePath}`);
+
+        const fileStream = fs.createReadStream(filePath);
 
         await b2Client.send(new PutObjectCommand({
             Bucket: BUCKET,
             Key: key,
-            Body: fileBuffer,
+            Body: fileStream,
+            ContentLength: fileStats.size,
             ContentType: 'video/mp4',
         }));
 
-        console.log(`✅ Video → B2 (private): ${key} (${fileSizeMB} MB)`);
+        console.log(`✅ Video → B2: ${key} (${fileSizeMB} MB)`);
         return { path: key };
     } catch (err) {
         console.error('❌ B2 upload failed:', err.message);
