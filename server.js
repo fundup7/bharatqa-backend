@@ -6,26 +6,36 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process'); // ← Add this
 
+
+// Video storage — Backblaze B2 (private bucket, 10GB free)
+let b2Storage = null;
+if (process.env.B2_KEY_ID) {
+    b2Storage = require('./storage-b2');
+    console.log('📹 Video storage: Backblaze B2 (10GB free, private)');
+} else {
+    console.log('📹 Video storage: Supabase (1GB free)');
+}
+
 // Fix ffprobe permissions on Render
 try {
-  const ffprobePath = path.join(__dirname, 'node_modules', 'ffprobe-static', 'bin', 'linux', 'x64', 'ffprobe');
-  if (fs.existsSync(ffprobePath)) {
-    execSync(`chmod +x "${ffprobePath}"`);
-    console.log('✅ ffprobe permissions fixed');
-  }
+    const ffprobePath = path.join(__dirname, 'node_modules', 'ffprobe-static', 'bin', 'linux', 'x64', 'ffprobe');
+    if (fs.existsSync(ffprobePath)) {
+        execSync(`chmod +x "${ffprobePath}"`);
+        console.log('✅ ffprobe permissions fixed');
+    }
 } catch (e) {
-  console.log('⚠️ ffprobe chmod skipped:', e.message);
+    console.log('⚠️ ffprobe chmod skipped:', e.message);
 }
 
 // Also fix ffmpeg if you use it
 try {
-  const ffmpegPath = path.join(__dirname, 'node_modules', 'ffmpeg-static', 'ffmpeg');
-  if (fs.existsSync(ffmpegPath)) {
-    execSync(`chmod +x "${ffmpegPath}"`);
-    console.log('✅ ffmpeg permissions fixed');
-  }
+    const ffmpegPath = path.join(__dirname, 'node_modules', 'ffmpeg-static', 'ffmpeg');
+    if (fs.existsSync(ffmpegPath)) {
+        execSync(`chmod +x "${ffmpegPath}"`);
+        console.log('✅ ffmpeg permissions fixed');
+    }
 } catch (e) {
-  console.log('⚠️ ffmpeg chmod skipped:', e.message);
+    console.log('⚠️ ffmpeg chmod skipped:', e.message);
 }
 
 const db = require('./db');
@@ -51,45 +61,86 @@ const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } }
 
 // Create test (linked to company)
 app.post('/api/tests', upload.single('apk'), async (req, res) => {
-  try {
-    const { company_name, app_name, instructions, company_id } = req.body;
+    try {
+        const { company_name, app_name, instructions, company_id } = req.body;
 
-    // DEBUG: Log what we receive
-    console.log('📦 req.body:', req.body);
-    console.log('📦 company_id:', company_id, 'type:', typeof company_id);
+        // DEBUG: Log what we receive
+        console.log('📦 req.body:', req.body);
+        console.log('📦 company_id:', company_id, 'type:', typeof company_id);
 
-    if (!company_name || !app_name || !instructions) {
-      return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
-    }
+        if (!company_name || !app_name || !instructions) {
+            return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
+        }
 
-    if (!company_id) {
-      return res.status(400).json({ error: 'company_id is required' });
-    }
+        if (!company_id) {
+            return res.status(400).json({ error: 'company_id is required' });
+        }
 
-    let apk_file_url = null, apk_file_path = null;
+        let apk_file_url = null, apk_file_path = null;
 
-    if (req.file) {
-      const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
-      apk_file_url = result.url;
-      apk_file_path = result.path;
-      fs.unlinkSync(req.file.path);
-    }
+        if (req.file) {
+            const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
+            apk_file_url = result.url;
+            apk_file_path = result.path;
+            fs.unlinkSync(req.file.path);
+        }
 
-    const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id) 
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id) 
                    VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`;
-    const result = await db.query(query, [
-      company_name, app_name, apk_file_url, apk_file_path, instructions,
-      parseInt(company_id)  // ← Force integer, not string
-    ]);
+        const result = await db.query(query, [
+            company_name, app_name, apk_file_url, apk_file_path, instructions,
+            parseInt(company_id)  // ← Force integer, not string
+        ]);
 
-    console.log('✅ Test created with company_id:', parseInt(company_id));
-    res.json({ id: result.rows[0].id, message: 'Test created!' });
+        console.log('✅ Test created with company_id:', parseInt(company_id));
+        res.json({ id: result.rows[0].id, message: 'Test created!' });
 
-  } catch (err) {
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    console.error('❌ Test creation error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
+    } catch (err) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        console.error('❌ Test creation error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// ============================================
+// VIDEO PROXY — Serves private B2 videos
+// ============================================
+app.get('/api/videos/:bugId', async (req, res) => {
+    try {
+        const bug = await db.query(
+            'SELECT recording_path, recording_storage FROM bugs WHERE id = $1',
+            [req.params.bugId]
+        );
+
+        if (!bug.rows[0]?.recording_path) {
+            return res.status(404).json({ error: 'No recording found' });
+        }
+
+        const row = bug.rows[0];
+
+        if (row.recording_storage === 'b2' && b2Storage) {
+            // Stream from B2 private bucket
+            const response = await b2Storage.getVideoStream(row.recording_path);
+            res.set('Content-Type', response.ContentType || 'video/mp4');
+            if (response.ContentLength) {
+                res.set('Content-Length', response.ContentLength);
+            }
+            response.Body.pipe(res);
+        } else if (row.recording_path) {
+            // Redirect to Supabase public URL
+            const bug2 = await db.query(
+                'SELECT recording_url FROM bugs WHERE id = $1',
+                [req.params.bugId]
+            );
+            res.redirect(bug2.rows[0].recording_url);
+        } else {
+            res.status(404).json({ error: 'Recording not available' });
+        }
+    } catch (err) {
+        console.error('Video proxy error:', err.message);
+        res.status(500).json({ error: 'Failed to stream video' });
+    }
 });
 
 // ============================================
@@ -149,18 +200,18 @@ app.post('/api/auth/google', async (req, res) => {
         }
 
         // In the res.json at the end of /api/auth/google
-res.json({
-  success: true,
-  company: {
-    id: company.id,
-    email: company.email,
-    name: company.name,
-    picture: company.picture,
-    company_name: company.company_name,
-    industry: company.industry,
-    onboarding_complete: company.onboarding_complete || false
-  }
-});
+        res.json({
+            success: true,
+            company: {
+                id: company.id,
+                email: company.email,
+                name: company.name,
+                picture: company.picture,
+                company_name: company.company_name,
+                industry: company.industry,
+                onboarding_complete: company.onboarding_complete || false
+            }
+        });
 
     } catch (err) {
         console.error('Auth error:', err.message);
@@ -170,43 +221,43 @@ res.json({
 
 // Complete company onboarding profile
 app.put('/api/auth/onboarding/:companyId', async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    const { 
-      company_name, industry, company_size, 
-      role, phone, website, referral_source 
-    } = req.body;
+    try {
+        const { companyId } = req.params;
+        const {
+            company_name, industry, company_size,
+            role, phone, website, referral_source
+        } = req.body;
 
-    if (!company_name || !industry || !company_size || !role || !phone) {
-      return res.status(400).json({ 
-        error: 'Please fill all required fields' 
-      });
-    }
+        if (!company_name || !industry || !company_size || !role || !phone) {
+            return res.status(400).json({
+                error: 'Please fill all required fields'
+            });
+        }
 
-    const result = await db.query(
-      `UPDATE companies SET 
+        const result = await db.query(
+            `UPDATE companies SET 
         company_name = $1, industry = $2, company_size = $3,
         role = $4, phone = $5, website = $6, referral_source = $7,
         onboarding_complete = TRUE
       WHERE id = $8 RETURNING *`,
-      [company_name, industry, company_size, role, phone, 
-       website || null, referral_source || null, companyId]
-    );
+            [company_name, industry, company_size, role, phone,
+                website || null, referral_source || null, companyId]
+        );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Company not found' });
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+
+        console.log(`✅ Onboarding complete: ${company_name}`);
+        res.json({
+            success: true,
+            company: result.rows[0]
+        });
+
+    } catch (err) {
+        console.error('Onboarding error:', err.message);
+        res.status(500).json({ error: err.message });
     }
-
-    console.log(`✅ Onboarding complete: ${company_name}`);
-    res.json({ 
-      success: true, 
-      company: result.rows[0] 
-    });
-
-  } catch (err) {
-    console.error('Onboarding error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Get company profile
@@ -283,100 +334,100 @@ app.get('/api/tests/:id', async (req, res) => {
 
 // Get full company profile
 app.get('/api/auth/company/:companyId', async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT id, email, name, picture, company_name, industry, 
+    try {
+        const result = await db.query(
+            `SELECT id, email, name, picture, company_name, industry, 
        company_size, role, phone, website, referral_source,
        onboarding_complete, created_at, last_login
        FROM companies WHERE id = $1`,
-      [req.params.companyId]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Company not found' });
+            [req.params.companyId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Update company profile (settings)
 app.put('/api/auth/company/:companyId', async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    const { 
-      company_name, industry, company_size, 
-      role, phone, website, referral_source 
-    } = req.body;
+    try {
+        const { companyId } = req.params;
+        const {
+            company_name, industry, company_size,
+            role, phone, website, referral_source
+        } = req.body;
 
-    if (!company_name || !industry || !company_size || !role || !phone) {
-      return res.status(400).json({ 
-        error: 'Please fill all required fields' 
-      });
-    }
+        if (!company_name || !industry || !company_size || !role || !phone) {
+            return res.status(400).json({
+                error: 'Please fill all required fields'
+            });
+        }
 
-    const phoneClean = phone.replace(/\D/g, '');
-    if (phoneClean.length < 10) {
-      return res.status(400).json({ 
-        error: 'Please enter a valid 10-digit phone number' 
-      });
-    }
+        const phoneClean = phone.replace(/\D/g, '');
+        if (phoneClean.length < 10) {
+            return res.status(400).json({
+                error: 'Please enter a valid 10-digit phone number'
+            });
+        }
 
-    const result = await db.query(
-      `UPDATE companies SET 
+        const result = await db.query(
+            `UPDATE companies SET 
         company_name = $1, industry = $2, company_size = $3,
         role = $4, phone = $5, website = $6, referral_source = $7
        WHERE id = $8 RETURNING *`,
-      [company_name, industry, company_size, role, 
-       phoneClean, website || null, referral_source || null, companyId]
-    );
+            [company_name, industry, company_size, role,
+                phoneClean, website || null, referral_source || null, companyId]
+        );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Company not found' });
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+
+        console.log(`✅ Profile updated: ${company_name}`);
+        res.json({
+            success: true,
+            company: result.rows[0]
+        });
+
+    } catch (err) {
+        console.error('Settings update error:', err.message);
+        res.status(500).json({ error: err.message });
     }
-
-    console.log(`✅ Profile updated: ${company_name}`);
-    res.json({ 
-      success: true, 
-      company: result.rows[0] 
-    });
-
-  } catch (err) {
-    console.error('Settings update error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Delete company account
 app.delete('/api/auth/company/:companyId', async (req, res) => {
-  try {
-    const { companyId } = req.params;
-    
-    // Delete all tests owned by this company first
-    await db.query(
-      'DELETE FROM tests WHERE company_id = $1', 
-      [companyId]
-    );
-    
-    // Delete the company
-    const result = await db.query(
-      'DELETE FROM companies WHERE id = $1 RETURNING email', 
-      [companyId]
-    );
+    try {
+        const { companyId } = req.params;
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Company not found' });
+        // Delete all tests owned by this company first
+        await db.query(
+            'DELETE FROM tests WHERE company_id = $1',
+            [companyId]
+        );
+
+        // Delete the company
+        const result = await db.query(
+            'DELETE FROM companies WHERE id = $1 RETURNING email',
+            [companyId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+
+        console.log(`🗑️ Account deleted: ${result.rows[0].email}`);
+        res.json({ success: true, message: 'Account deleted' });
+
+    } catch (err) {
+        console.error('Delete account error:', err.message);
+        res.status(500).json({ error: err.message });
     }
-
-    console.log(`🗑️ Account deleted: ${result.rows[0].email}`);
-    res.json({ success: true, message: 'Account deleted' });
-
-  } catch (err) {
-    console.error('Delete account error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ============================================
@@ -388,7 +439,7 @@ app.delete('/api/auth/company/:companyId', async (req, res) => {
 app.post('/api/testers/register', async (req, res) => {
     try {
         const {
-            full_name, phone, upi_id, 
+            full_name, phone, upi_id,
             google_id, email, profile_picture, // New fields
             device_model, android_version, screen_resolution,
             latitude, longitude, city, state, full_address
@@ -403,12 +454,12 @@ app.post('/api/testers/register', async (req, res) => {
 
         // 1. Try to find existing user by Google ID or Phone
         let existing = null;
-        
+
         if (google_id) {
             const r = await db.query('SELECT * FROM testers WHERE google_id = $1', [google_id]);
             if (r.rows.length > 0) existing = r.rows[0];
         }
-        
+
         if (!existing && phoneClean) {
             const r = await db.query('SELECT * FROM testers WHERE phone = $1', [phoneClean]);
             if (r.rows.length > 0) existing = r.rows[0];
@@ -457,7 +508,7 @@ app.post('/api/testers/register', async (req, res) => {
                 [
                     full_name, phoneClean, upi_id, google_id, email, profile_picture,
                     device_model, android_version, screen_resolution,
-                    latitude || 0, longitude || 0, city || 'Unknown', 
+                    latitude || 0, longitude || 0, city || 'Unknown',
                     state || 'Unknown', full_address || 'Unknown'
                 ]
             );
@@ -488,41 +539,41 @@ app.post('/api/testers/register', async (req, res) => {
 
 // Get tester profile
 app.get('/api/testers/:testerId', async (req, res) => {
-  try {
-    const result = await db.query(
-      'SELECT * FROM testers WHERE id = $1', 
-      [req.params.testerId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Tester not found' });
+    try {
+        const result = await db.query(
+            'SELECT * FROM testers WHERE id = $1',
+            [req.params.testerId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Tester not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Update tester UPI
 app.put('/api/testers/:testerId/upi', async (req, res) => {
-  try {
-    const { upi_id } = req.body;
-    if (!upi_id) {
-      return res.status(400).json({ error: 'UPI ID is required' });
+    try {
+        const { upi_id } = req.body;
+        if (!upi_id) {
+            return res.status(400).json({ error: 'UPI ID is required' });
+        }
+
+        const result = await db.query(
+            'UPDATE testers SET upi_id = $1 WHERE id = $2 RETURNING *',
+            [upi_id, req.params.testerId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Tester not found' });
+        }
+
+        res.json({ success: true, tester: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    
-    const result = await db.query(
-      'UPDATE testers SET upi_id = $1 WHERE id = $2 RETURNING *',
-      [upi_id, req.params.testerId]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Tester not found' });
-    }
-    
-    res.json({ success: true, tester: result.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ===== APP VERSION / UPDATE ROUTES =====
@@ -642,21 +693,21 @@ app.get('/api/app/check-update/:currentVersionCode', async (req, res) => {
 });
 // Update tester location (called on each test)
 app.put('/api/testers/:testerId/location', async (req, res) => {
-  try {
-    const { latitude, longitude, city, state, full_address } = req.body;
-    await db.query(
-      `UPDATE testers SET 
+    try {
+        const { latitude, longitude, city, state, full_address } = req.body;
+        await db.query(
+            `UPDATE testers SET 
         latitude = $1, longitude = $2, city = $3, 
         state = $4, full_address = $5, last_active = NOW()
       WHERE id = $6`,
-      [latitude || 0, longitude || 0, city || 'Unknown', 
-       state || 'Unknown', full_address || 'Unknown', 
-       req.params.testerId]
-    );
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+            [latitude || 0, longitude || 0, city || 'Unknown',
+            state || 'Unknown', full_address || 'Unknown',
+            req.params.testerId]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // GET /api/testers/google/:googleId
@@ -763,12 +814,28 @@ app.post('/api/bugs', upload.fields([
         const finalSev = validSev.includes(severity) ? severity : 'low';
 
         // Upload recording
-        let recording_url = null, recording_path = null;
+        // Upload recording
+        let recording_url = null, recording_path = null, recording_storage = 'supabase';
+
         if (req.files?.['recording']) {
             const file = req.files['recording'][0];
-            const result = await storage.uploadFile(file.path, 'recordings', file.originalname);
-            recording_url = result.url;
-            recording_path = result.path;
+
+            if (b2Storage) {
+                // ★ Upload to Backblaze B2 private bucket (10GB free)
+                const result = await b2Storage.uploadVideo(file.path, file.originalname);
+                recording_path = result.path;
+                recording_storage = 'b2';
+                // URL points to our proxy endpoint
+                recording_url = `/api/videos/${null}`; // Will update after insert
+                console.log(`📹 Video → B2: ${(file.size / 1024 / 1024).toFixed(1)} MB`);
+            } else {
+                // Fallback to Supabase
+                const result = await storage.uploadFile(file.path, 'recordings', file.originalname);
+                recording_url = result.url;
+                recording_path = result.path;
+                recording_storage = 'supabase';
+            }
+
             fs.unlinkSync(file.path);
         }
 
@@ -790,18 +857,30 @@ app.post('/api/bugs', upload.fields([
         let statsJson = null;
         try { statsJson = device_stats ? JSON.parse(device_stats) : null; } catch (e) { }
 
-        const query = `INSERT INTO bugs (test_id, tester_name, bug_title, bug_description, severity,
-                        device_info, recording_url, recording_path, screenshots, screenshot_paths,
-                        test_duration, device_stats) 
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`;
+        const query = `INSERT INTO bugs (
+    test_id, tester_name, bug_title, bug_description, severity,
+    device_info, recording_url, recording_path, recording_storage,
+    screenshots, screenshot_paths, test_duration, device_stats
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`;
 
         const result = await db.query(query, [
             test_id, tester_name, bug_title, bug_description, finalSev,
-            device_info, recording_url, recording_path, screenshots, screenshot_paths,
+            device_info, recording_url, recording_path, recording_storage,
+            screenshots, screenshot_paths,
             test_duration || 0, JSON.stringify(statsJson)
         ]);
 
         const bugId = result.rows[0].id;
+
+        // Update recording URL to point to proxy (for B2 videos)
+        if (recording_storage === 'b2') {
+            const proxyUrl = `/api/videos/${bugId}`;
+            await db.query(
+                'UPDATE bugs SET recording_url = $1 WHERE id = $2',
+                [proxyUrl, bugId]
+            );
+            recording_url = proxyUrl;
+        }
 
         // Create earnings
         await db.query('INSERT INTO earnings (tester_name, test_id) VALUES ($1, $2)', [tester_name, test_id]);
@@ -844,10 +923,24 @@ app.post('/api/bugs', upload.fields([
 app.delete('/api/bugs/:id', async (req, res) => {
     try {
         const bugId = req.params.id;
-        const bug = await db.query('SELECT recording_path, screenshot_paths FROM bugs WHERE id = $1', [bugId]);
-        const frames = await db.query('SELECT frame_path FROM ai_frames WHERE bug_id = $1', [bugId]);
+        const bug = await db.query(
+            'SELECT recording_path, recording_storage, screenshot_paths FROM bugs WHERE id = $1',
+            [bugId]
+        );
+        const frames = await db.query(
+            'SELECT frame_path FROM ai_frames WHERE bug_id = $1',
+            [bugId]
+        );
 
-        if (bug.rows[0]?.recording_path) await storage.deleteFile('recordings', bug.rows[0].recording_path);
+        // Delete recording from correct storage
+        if (bug.rows[0]?.recording_path) {
+            if (bug.rows[0].recording_storage === 'b2' && b2Storage) {
+                await b2Storage.deleteVideo(bug.rows[0].recording_path);
+            } else {
+                await storage.deleteFile('recordings', bug.rows[0].recording_path);
+            }
+        }
+
         if (bug.rows[0]?.screenshot_paths) {
             const paths = bug.rows[0].screenshot_paths.split(',').map(p => p.trim());
             await storage.deleteFiles('screenshots', paths);
@@ -858,8 +951,9 @@ app.delete('/api/bugs/:id', async (req, res) => {
 
         await db.query('DELETE FROM bugs WHERE id = $1', [bugId]);
         res.json({ message: 'Bug deleted' });
-
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ============================================
