@@ -525,6 +525,122 @@ app.put('/api/testers/:testerId/upi', async (req, res) => {
   }
 });
 
+// ===== APP VERSION / UPDATE ROUTES =====
+
+// GET /api/app/latest-version — app checks this on launch
+router.get('/app/latest-version', async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT version_code, version_name, apk_url, release_notes, 
+                    is_mandatory, min_supported_version
+             FROM app_versions 
+             WHERE is_active = true 
+             ORDER BY version_code DESC 
+             LIMIT 1`
+        );
+
+        if (result.rows.length === 0) {
+            return res.json({
+                success: true,
+                update_available: false
+            });
+        }
+
+        const latest = result.rows[0];
+        res.json({
+            success: true,
+            update_available: true,
+            latest: {
+                version_code: latest.version_code,
+                version_name: latest.version_name,
+                apk_url: latest.apk_url,
+                release_notes: latest.release_notes,
+                is_mandatory: latest.is_mandatory,
+                min_supported_version: latest.min_supported_version
+            }
+        });
+    } catch (err) {
+        console.error('Version check error:', err);
+        res.status(500).json({ success: false, error: 'Failed to check version' });
+    }
+});
+
+// POST /api/app/release — you call this from admin dashboard to push update
+router.post('/app/release', async (req, res) => {
+    try {
+        const { version_code, version_name, apk_url, release_notes, is_mandatory, min_supported_version } = req.body;
+
+        if (!version_code || !version_name || !apk_url) {
+            return res.status(400).json({ success: false, error: 'version_code, version_name, apk_url required' });
+        }
+
+        // Deactivate old versions
+        await pool.query('UPDATE app_versions SET is_active = false');
+
+        const result = await pool.query(
+            `INSERT INTO app_versions (version_code, version_name, apk_url, release_notes, is_mandatory, min_supported_version, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, true)
+             RETURNING *`,
+            [
+                version_code,
+                version_name,
+                apk_url,
+                release_notes || '',
+                is_mandatory !== false,
+                min_supported_version || 1
+            ]
+        );
+
+        res.json({ success: true, version: result.rows[0] });
+    } catch (err) {
+        console.error('Release error:', err);
+        res.status(500).json({ success: false, error: 'Failed to create release' });
+    }
+});
+
+// GET /api/app/check-update/:currentVersionCode — detailed check
+router.get('/app/check-update/:currentVersionCode', async (req, res) => {
+    try {
+        const currentVersion = parseInt(req.params.currentVersionCode);
+
+        const result = await pool.query(
+            `SELECT version_code, version_name, apk_url, release_notes, 
+                    is_mandatory, min_supported_version
+             FROM app_versions 
+             WHERE is_active = true 
+             ORDER BY version_code DESC 
+             LIMIT 1`
+        );
+
+        if (result.rows.length === 0) {
+            return res.json({ success: true, update_available: false });
+        }
+
+        const latest = result.rows[0];
+        const updateAvailable = latest.version_code > currentVersion;
+        const forceUpdate = updateAvailable && (
+            latest.is_mandatory || currentVersion < latest.min_supported_version
+        );
+
+        res.json({
+            success: true,
+            update_available: updateAvailable,
+            force_update: forceUpdate,
+            current_version: currentVersion,
+            latest: updateAvailable ? {
+                version_code: latest.version_code,
+                version_name: latest.version_name,
+                apk_url: latest.apk_url,
+                release_notes: latest.release_notes,
+                is_mandatory: latest.is_mandatory
+            } : null
+        });
+    } catch (err) {
+        console.error('Update check error:', err);
+        res.status(500).json({ success: false, error: 'Failed to check update' });
+    }
+});
+
 // Update tester location (called on each test)
 app.put('/api/testers/:testerId/location', async (req, res) => {
   try {
