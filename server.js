@@ -46,6 +46,31 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ============================================
+// GLOBAL API KEY MIDDLEWARE
+// ============================================
+const API_KEY = process.env.API_KEY;
+
+if (!API_KEY) {
+    console.warn('⚠️  WARNING: API_KEY is not set. All endpoints are unprotected!');
+}
+
+app.use((req, res, next) => {
+    // Whitelist health check (for uptime monitors / Render)
+    if (req.path === '/api/health') return next();
+
+    // If no key is configured, skip enforcement (local dev mode)
+    if (!API_KEY) return next();
+
+    const provided = req.headers['x-api-key'] || req.query.api_key;
+
+    if (!provided || provided !== API_KEY) {
+        return res.status(401).json({ error: 'Unauthorized: invalid or missing API key' });
+    }
+
+    next();
+});
+
 // Temp folder for uploads before sending to Supabase
 const tempDir = path.join(__dirname, 'temp-uploads');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
@@ -309,10 +334,10 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
 
 // Get tests for a specific company
 app.get('/api/company/:companyId/tests', async (req, res) => {
-  try {
-    const companyId = Number(req.params.companyId);
+    try {
+        const companyId = Number(req.params.companyId);
 
-    const sql = `
+        const sql = `
       SELECT
         t.*,
         (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id) AS bug_count,
@@ -325,26 +350,26 @@ app.get('/api/company/:companyId/tests', async (req, res) => {
       ORDER BY t.created_at DESC;
     `;
 
-    const result = await db.query(sql, [companyId]);
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+        const result = await db.query(sql, [companyId]);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/company/:companyId/unique-testers', async (req, res) => {
-  try {
-    const r = await db.query(
-      `SELECT COUNT(DISTINCT b.tester_id) AS unique_testers
+    try {
+        const r = await db.query(
+            `SELECT COUNT(DISTINCT b.tester_id) AS unique_testers
        FROM bugs b
        JOIN tests t ON t.id = b.test_id
        WHERE t.company_id = $1 AND b.tester_id IS NOT NULL`,
-      [req.params.companyId]
-    );
-    res.json({ unique_testers: Number(r.rows[0].unique_testers || 0) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+            [req.params.companyId]
+        );
+        res.json({ unique_testers: Number(r.rows[0].unique_testers || 0) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 app.get('/api/tests/:id', async (req, res) => {
     try {
@@ -882,12 +907,12 @@ app.post('/api/bugs', upload.fields([
         // Parse device stats
         let statsJson = null;
         try { statsJson = device_stats ? JSON.parse(device_stats) : null; } catch (e) { }
-		
-	let testerId = null;
-	if (tester_google_id) {
-  	const tr = await db.query('SELECT id FROM testers WHERE google_id = $1', [tester_google_id]);
-	testerId = tr.rows[0]?.id || null;
-	}
+
+        let testerId = null;
+        if (tester_google_id) {
+            const tr = await db.query('SELECT id FROM testers WHERE google_id = $1', [tester_google_id]);
+            testerId = tr.rows[0]?.id || null;
+        }
 
         const query = `INSERT INTO bugs (
     test_id, tester_name, bug_title, bug_description, severity,
@@ -899,7 +924,7 @@ app.post('/api/bugs', upload.fields([
             test_id, tester_name, bug_title, bug_description, finalSev,
             device_info, recording_url, recording_path, recording_storage,
             screenshots, screenshot_paths,
-            test_duration || 0, JSON.stringify(statsJson)
+            test_duration || 0, JSON.stringify(statsJson), testerId
         ]);
 
         const bugId = result.rows[0].id;

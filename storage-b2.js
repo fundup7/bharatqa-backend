@@ -1,9 +1,9 @@
 // storage-b2.js — Backblaze B2 Private Bucket (10GB free, no credit card)
-const { 
-    S3Client, 
-    PutObjectCommand, 
-    GetObjectCommand, 
-    DeleteObjectCommand 
+const {
+    S3Client,
+    PutObjectCommand,
+    GetObjectCommand,
+    DeleteObjectCommand
 } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
