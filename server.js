@@ -820,9 +820,14 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
             return res.status(400).json({ success: false, error: 'No APK file uploaded' });
         }
 
-        console.log(`🚀 Uploading APK to Supabase Storage: ${req.file.originalname}`);
+        if (!b2Storage) {
+            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            return res.status(500).json({ success: false, error: 'B2 Storage is not configured' });
+        }
 
-        const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
+        console.log(`🚀 Uploading APK to Backblaze B2: ${req.file.originalname}`);
+
+        const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
 
         // Delete temp file
         if (fs.existsSync(req.file.path)) {
@@ -831,14 +836,44 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
 
         res.json({
             success: true,
-            apk_url: result.url,
-            message: 'APK uploaded successfully'
+            // Return BOTH the full B2 proxy url and the raw B2 key for internal streaming
+            apk_url: `/api/app/download/${result.key}`,
+            message: 'APK uploaded to Backblaze B2 successfully'
         });
 
     } catch (err) {
         if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         console.error('App Upload error:', err);
         res.status(500).json({ success: false, error: 'Failed to upload APK to B2: ' + err.message });
+    }
+});
+
+// GET /api/app/download/* — Proxy APK downloads from B2
+app.get('/api/app/download/*', async (req, res) => {
+    try {
+        // The wildcard matched path corresponds to the B2 Key (e.g. app-updates/bharatqa_update.apk)
+        const b2Key = req.params[0];
+
+        if (!b2Key || !b2Storage) {
+            return res.status(404).send('APK not found or B2 not configured');
+        }
+
+        console.log(`⬇️ Proxying APK from B2: ${b2Key}`);
+
+        // Use the existing video stream method in B2 since it retrieves the file object stream identically
+        const response = await b2Storage.getVideoStream(b2Key);
+
+        res.set('Content-Type', 'application/vnd.android.package-archive');
+        res.set('Content-Disposition', `attachment; filename="bharatqa_update.apk"`);
+        if (response.ContentLength) {
+            res.set('Content-Length', response.ContentLength);
+        }
+
+        response.Body.pipe(res);
+
+    } catch (err) {
+        console.error('App Download Proxy error:', err.message);
+        res.status(500).send('Failed to stream APK from B2');
     }
 });
 
