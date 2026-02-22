@@ -1036,8 +1036,13 @@ app.post('/api/bugs', upload.fields([
 
         // Auto AI analysis (fire-and-forget AFTER response)
         if (recording_url && process.env.GEMINI_API_KEY) {
-            console.log(`🤖 Auto-analysis starting for bug #${bugId}...`);
-            analyzeBugReport(bugId, recording_url, device_stats, bug_description)
+            // Resolve relative B2 proxy URLs to absolute URL
+            const backendBase = process.env.BACKEND_URL || 'https://bharatqa-backend.onrender.com';
+            const fullVideoUrl = recording_url.startsWith('http')
+                ? recording_url
+                : `${backendBase}${recording_url}`;
+            console.log(`🤖 Auto-analysis starting for bug #${bugId}... (${fullVideoUrl})`);
+            analyzeBugReport(bugId, fullVideoUrl, device_stats, bug_description)
                 .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error}`))
                 .catch(e => console.error('Analysis error:', e.message));
         }
@@ -1101,7 +1106,12 @@ app.post('/api/bugs/:id/analyze', async (req, res) => {
         res.json({ success: true, message: 'Analysis started. Refresh in 30-60s.' });
 
         const b = bug.rows[0];
-        analyzeBugReport(b.id, b.recording_url, JSON.stringify(b.device_stats), b.bug_description)
+        // Resolve relative B2 proxy URLs to absolute URL
+        const backendBase = process.env.BACKEND_URL || 'https://bharatqa-backend.onrender.com';
+        const fullVideoUrl = b.recording_url.startsWith('http')
+            ? b.recording_url
+            : `${backendBase}${b.recording_url}`;
+        analyzeBugReport(b.id, fullVideoUrl, JSON.stringify(b.device_stats), b.bug_description)
             .catch(e => console.error('Analysis error:', e.message));
 
     } catch (err) { res.status(500).json({ error: err.message }); }

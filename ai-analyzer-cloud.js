@@ -14,10 +14,10 @@ const storage = require('./storage');
 try {
   const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
   const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-  
+
   ffmpeg.setFfmpegPath(ffmpegPath);
   ffmpeg.setFfprobePath(ffprobePath);
-  
+
   console.log('✅ ffmpeg:', ffmpegPath);
   console.log('✅ ffprobe:', ffprobePath);
 } catch (e) {
@@ -58,19 +58,25 @@ function fixBinaryPermissions() {
 fixBinaryPermissions();
 
 
-function downloadFile(url, dest) {
+function downloadFile(url, dest, headers = {}) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
     const file = fs.createWriteStream(dest);
-    client.get(url, res => {
+    const options = { headers };
+    client.get(url, options, res => {
       if (res.statusCode === 301 || res.statusCode === 302) {
         file.close();
         fs.unlinkSync(dest);
-        return downloadFile(res.headers.location, dest).then(resolve).catch(reject);
+        return downloadFile(res.headers.location, dest, headers).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlink(dest, () => { });
+        return reject(new Error(`HTTP ${res.statusCode} downloading video`));
       }
       res.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
-    }).on('error', err => { fs.unlink(dest, () => {}); reject(err); });
+    }).on('error', err => { fs.unlink(dest, () => { }); reject(err); });
   });
 }
 
@@ -182,10 +188,11 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
   try {
     console.log(`\n🤖 ═══ Cloud Analysis: Bug #${bugId} ═══`);
 
-    // Download video
+    // Download video (pass API key if fetching from our own backend)
     const videoPath = path.join(tempDir, 'video.mp4');
     console.log('⬇️ Downloading video...');
-    await downloadFile(videoUrl, videoPath);
+    const downloadHeaders = process.env.API_KEY ? { 'x-api-key': process.env.API_KEY } : {};
+    await downloadFile(videoUrl, videoPath, downloadHeaders);
     const fileSize = Math.round(fs.statSync(videoPath).size / 1024);
     console.log(`✅ Downloaded: ${fileSize}KB`);
 
@@ -210,7 +217,7 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
     // If frame extraction failed, try sending video URL directly to Gemini
     if (raw.length === 0) {
       console.log('⚠️ No frames extracted, trying text-only analysis...');
-      
+
       const models = ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-1.5-flash-latest'];
       let analysis = null, usedModel = null;
 
