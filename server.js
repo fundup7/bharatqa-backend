@@ -820,14 +820,9 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
             return res.status(400).json({ success: false, error: 'No APK file uploaded' });
         }
 
-        if (!b2Storage) {
-            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-            return res.status(500).json({ success: false, error: 'B2 Storage is not configured' });
-        }
+        console.log(`🚀 Uploading APK to Supabase Storage: ${req.file.originalname}`);
 
-        console.log(`🚀 Uploading APK to Backblaze B2: ${req.file.originalname}`);
-
-        const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
+        const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
 
         // Delete temp file
         if (fs.existsSync(req.file.path)) {
@@ -837,7 +832,7 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
         res.json({
             success: true,
             apk_url: result.url,
-            message: 'APK uploaded to Backblaze B2 successfully'
+            message: 'APK uploaded successfully'
         });
 
     } catch (err) {
