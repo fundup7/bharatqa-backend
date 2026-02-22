@@ -491,9 +491,11 @@ app.post('/api/testers/register', async (req, res) => {
     try {
         const {
             full_name, phone, upi_id,
-            google_id, email, profile_picture, // New fields
+            google_id, email, profile_picture,
             device_model, android_version, screen_resolution,
-            latitude, longitude, city, state, full_address
+            latitude, longitude, city, state, full_address,
+            // Targeting profile fields
+            ram_gb, network_type, device_tier
         } = req.body;
 
         // We need at least a phone number OR a google_id to proceed
@@ -536,13 +538,17 @@ app.post('/api/testers/register', async (req, res) => {
                 state = COALESCE($12, state),
                 full_address = COALESCE($13, full_address),
                 phone = COALESCE($14, phone),
+                ram_gb = COALESCE($16, ram_gb),
+                network_type = COALESCE($17, network_type),
+                device_tier = COALESCE($18, device_tier),
                 last_active = NOW()
                 WHERE id = $15 RETURNING *`,
                 [
                     full_name, upi_id, google_id, email, profile_picture,
                     device_model, android_version, screen_resolution,
                     latitude, longitude, city, state, full_address,
-                    phoneClean, existing.id
+                    phoneClean, existing.id,
+                    ram_gb || null, network_type || null, device_tier || null
                 ]
             );
             tester = result.rows[0];
@@ -553,18 +559,29 @@ app.post('/api/testers/register', async (req, res) => {
                 `INSERT INTO testers (
                     full_name, phone, upi_id, google_id, email, profile_picture,
                     device_model, android_version, screen_resolution,
-                    latitude, longitude, city, state, full_address
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
+                    latitude, longitude, city, state, full_address,
+                    ram_gb, network_type, device_tier
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
                 RETURNING *`,
                 [
                     full_name, phoneClean, upi_id, google_id, email, profile_picture,
                     device_model, android_version, screen_resolution,
                     latitude || 0, longitude || 0, city || 'Unknown',
-                    state || 'Unknown', full_address || 'Unknown'
+                    state || 'Unknown', full_address || 'Unknown',
+                    ram_gb || null, network_type || null, device_tier || null
                 ]
             );
             tester = result.rows[0];
             console.log(`✨ New tester registered: ${tester.full_name}`);
+        }
+
+        // Check if banned
+        if (tester.is_banned) {
+            return res.status(403).json({
+                success: false,
+                banned: true,
+                ban_reason: tester.ban_reason || 'Your account has been suspended.'
+            });
         }
 
         res.json({
@@ -578,7 +595,10 @@ app.post('/api/testers/register', async (req, res) => {
                 profile_picture: tester.profile_picture,
                 upi_id: tester.upi_id,
                 total_tests: tester.total_tests || 0,
-                total_earnings: tester.total_earnings || 0
+                total_earnings: tester.total_earnings || 0,
+                ram_gb: tester.ram_gb,
+                network_type: tester.network_type,
+                device_tier: tester.device_tier
             }
         });
 
@@ -844,7 +864,57 @@ app.get('/api/tests/:id/download-apk', async (req, res) => {
 
 app.get('/api/available-tests', async (req, res) => {
     try {
-        const result = await db.query("SELECT * FROM tests WHERE status = 'active' ORDER BY created_at DESC");
+        const { tester_id, google_id } = req.query;
+
+        // Resolve tester from google_id or tester_id
+        let tester = null;
+        if (google_id) {
+            const r = await db.query('SELECT * FROM testers WHERE google_id = $1', [google_id]);
+            tester = r.rows[0] || null;
+        } else if (tester_id) {
+            const r = await db.query('SELECT * FROM testers WHERE id = $1', [tester_id]);
+            tester = r.rows[0] || null;
+        }
+
+        // Block banned testers
+        if (tester?.is_banned) {
+            return res.status(403).json({
+                success: false,
+                banned: true,
+                ban_reason: tester.ban_reason || 'Your account has been suspended.'
+            });
+        }
+
+        // Base query for active tests
+        let sql = `SELECT * FROM tests WHERE status = 'active'`;
+        const params = [];
+
+        if (tester) {
+            // Filter tests by targeting criteria matching this tester's profile
+            // A test's criteria field is NULL = open to all; otherwise must match
+            sql += `
+              AND (
+                criteria IS NULL
+                OR (
+                  (criteria->>'device_tier' IS NULL OR criteria->>'device_tier' = '' OR criteria->>'device_tier' = $${params.length + 1}::text)
+                  AND (criteria->>'network_type' IS NULL OR criteria->>'network_type' = '' OR criteria->>'network_type' = $${params.length + 2}::text)
+                  AND (criteria->>'min_ram_gb' IS NULL OR (criteria->>'min_ram_gb')::numeric <= $${params.length + 3}::numeric)
+                  AND (criteria->>'max_ram_gb' IS NULL OR (criteria->>'max_ram_gb')::numeric >= $${params.length + 3}::numeric)
+                  AND (criteria->>'allowed_states' IS NULL OR criteria->>'allowed_states' = '' OR criteria->>'allowed_states' ILIKE $${params.length + 4}::text)
+                  AND (criteria->>'allowed_cities' IS NULL OR criteria->>'allowed_cities' = '' OR criteria->>'allowed_cities' ILIKE $${params.length + 5}::text)
+                )
+              )`;
+            params.push(
+                tester.device_tier || '',
+                tester.network_type || '',
+                tester.ram_gb || 0,
+                `%${tester.state || ''}%`,
+                `%${tester.city || ''}%`
+            );
+        }
+
+        sql += ' ORDER BY created_at DESC';
+        const result = await db.query(sql, params);
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1081,6 +1151,138 @@ app.get('/api/admin/stats', async (req, res) => {
         const stats = result.rows[0] || {};
         stats.ai_enabled = !!process.env.GEMINI_API_KEY;
         res.json(stats);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/admin/testers — list all testers with profile + ban status
+app.get('/api/admin/testers', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT id, full_name, email, phone, city, state,
+                    device_model, android_version, ram_gb, network_type, device_tier,
+                    is_banned, ban_reason, total_tests, total_earnings, last_active, created_at
+             FROM testers ORDER BY created_at DESC`
+        );
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/admin/testers/:id/ban — ban a tester
+app.post('/api/admin/testers/:id/ban', async (req, res) => {
+    try {
+        const { ban_reason } = req.body;
+        const result = await db.query(
+            `UPDATE testers SET is_banned = TRUE, ban_reason = $1 WHERE id = $2 RETURNING id, full_name, is_banned, ban_reason`,
+            [ban_reason || 'Violation of terms of service', req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tester not found' });
+        console.log(`🚫 Tester banned: ${result.rows[0].full_name} — ${ban_reason}`);
+        res.json({ success: true, tester: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/admin/testers/:id/ban — unban a tester
+app.delete('/api/admin/testers/:id/ban', async (req, res) => {
+    try {
+        const result = await db.query(
+            `UPDATE testers SET is_banned = FALSE, ban_reason = NULL WHERE id = $1 RETURNING id, full_name, is_banned`,
+            [req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tester not found' });
+        console.log(`✅ Tester unbanned: ${result.rows[0].full_name}`);
+        res.json({ success: true, tester: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/tests/:id/criteria — set targeting criteria for a test
+// Criteria fields (all optional, null = no restriction):
+//   device_tier: 'low' | 'mid' | 'high'
+//   network_type: '2g' | '3g' | '4g' | '5g' | 'wifi'
+//   min_ram_gb: number
+//   max_ram_gb: number
+//   allowed_states: comma-separated state names e.g. "Maharashtra,Delhi"
+//   allowed_cities: comma-separated city names
+app.put('/api/tests/:id/criteria', async (req, res) => {
+    try {
+        const { device_tier, network_type, min_ram_gb, max_ram_gb, allowed_states, allowed_cities } = req.body;
+
+        const criteria = {};
+        if (device_tier) criteria.device_tier = device_tier;
+        if (network_type) criteria.network_type = network_type;
+        if (min_ram_gb != null) criteria.min_ram_gb = min_ram_gb;
+        if (max_ram_gb != null) criteria.max_ram_gb = max_ram_gb;
+        if (allowed_states) criteria.allowed_states = allowed_states;
+        if (allowed_cities) criteria.allowed_cities = allowed_cities;
+
+        const isEmpty = Object.keys(criteria).length === 0;
+
+        const result = await db.query(
+            `UPDATE tests SET criteria = $1 WHERE id = $2 RETURNING id, app_name, criteria`,
+            [isEmpty ? null : JSON.stringify(criteria), req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
+        console.log(`🎯 Criteria updated for test #${req.params.id}:`, criteria);
+        res.json({ success: true, test: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/tests/:id/criteria — get targeting criteria for a test
+app.get('/api/tests/:id/criteria', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT id, app_name, criteria FROM tests WHERE id = $1`,
+            [req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
+        res.json({ success: true, test: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/tests/:id/eligible-testers — list testers who match this test's criteria
+app.get('/api/tests/:id/eligible-testers', async (req, res) => {
+    try {
+        const testRes = await db.query('SELECT criteria FROM tests WHERE id = $1', [req.params.id]);
+        if (testRes.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
+
+        const criteria = testRes.rows[0].criteria;
+
+        let sql = `SELECT id, full_name, email, city, state, device_model, android_version,
+                          ram_gb, network_type, device_tier, total_tests, last_active
+                   FROM testers WHERE is_banned = FALSE OR is_banned IS NULL`;
+        const params = [];
+
+        if (criteria) {
+            if (criteria.device_tier) {
+                params.push(criteria.device_tier);
+                sql += ` AND device_tier = $${params.length}`;
+            }
+            if (criteria.network_type) {
+                params.push(criteria.network_type);
+                sql += ` AND network_type = $${params.length}`;
+            }
+            if (criteria.min_ram_gb != null) {
+                params.push(criteria.min_ram_gb);
+                sql += ` AND ram_gb >= $${params.length}`;
+            }
+            if (criteria.max_ram_gb != null) {
+                params.push(criteria.max_ram_gb);
+                sql += ` AND ram_gb <= $${params.length}`;
+            }
+            if (criteria.allowed_states) {
+                const states = criteria.allowed_states.split(',').map(s => s.trim());
+                params.push(states);
+                sql += ` AND state = ANY($${params.length})`;
+            }
+            if (criteria.allowed_cities) {
+                const cities = criteria.allowed_cities.split(',').map(c => c.trim());
+                params.push(cities);
+                sql += ` AND city = ANY($${params.length})`;
+            }
+        }
+
+        sql += ' ORDER BY last_active DESC';
+        const result = await db.query(sql, params);
+        res.json({ success: true, count: result.rows.length, testers: result.rows });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
