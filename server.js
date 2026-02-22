@@ -813,6 +813,40 @@ app.get('/api/app/latest-version', async (req, res) => {
     }
 });
 
+// POST /api/app/upload-apk — push new APK to B2 directly
+app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: 'No APK file uploaded' });
+        }
+
+        if (!b2Storage) {
+            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            return res.status(500).json({ success: false, error: 'B2 Storage is not configured' });
+        }
+
+        console.log(`🚀 Uploading APK to Backblaze B2: ${req.file.originalname}`);
+
+        const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
+
+        // Delete temp file
+        if (fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+
+        res.json({
+            success: true,
+            apk_url: result.url,
+            message: 'APK uploaded to Backblaze B2 successfully'
+        });
+
+    } catch (err) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        console.error('App Upload error:', err);
+        res.status(500).json({ success: false, error: 'Failed to upload APK to B2: ' + err.message });
+    }
+});
+
 // POST /api/app/release — push update from admin
 app.post('/api/app/release', async (req, res) => {
     try {

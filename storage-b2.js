@@ -58,6 +58,49 @@ async function uploadVideo(filePath, originalName) {
     }
 }
 
+// Upload APK to B2 (Returns a direct public URL)
+async function uploadApk(filePath, originalName) {
+    try {
+        const timestamp = Date.now();
+        // Always enforce .apk extension for safety
+        const key = `app-updates/bharatqa_update_${timestamp}.apk`;
+
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${filePath}`);
+        }
+
+        const fileStats = fs.statSync(filePath);
+        const fileSizeMB = (fileStats.size / 1024 / 1024).toFixed(1);
+
+        if (fileStats.size === 0) {
+            throw new Error('File is empty (0 bytes)');
+        }
+
+        console.log(`📦 Uploading APK to B2: ${fileSizeMB} MB from ${filePath}`);
+
+        const fileStream = fs.createReadStream(filePath);
+
+        await b2Client.send(new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: key,
+            Body: fileStream,
+            ContentLength: fileStats.size,
+            ContentType: 'application/vnd.android.package-archive', // Standard Android APK MIME type
+        }));
+
+        // Construct the public URL (Assuming bucket is public, or this folder is public)
+        // Backblaze S3 compatible URL format: https://<bucketName>.s3.<region>.backblazeb2.com/<key>
+        const region = 'us-west-004'; // Need to match the region in your b2Client
+        const publicUrl = `https://${BUCKET}.s3.${region}.backblazeb2.com/${key}`;
+
+        console.log(`✅ APK → B2: ${publicUrl} (${fileSizeMB} MB)`);
+        return { url: publicUrl, key };
+    } catch (err) {
+        console.error('❌ B2 APK upload failed:', err.message);
+        throw err;
+    }
+}
+
 // Stream video from B2 (for proxy endpoint)
 async function getVideoStream(key) {
     const response = await b2Client.send(new GetObjectCommand({
@@ -87,4 +130,4 @@ async function deleteVideos(keys) {
     }
 }
 
-module.exports = { uploadVideo, getVideoStream, deleteVideo, deleteVideos };
+module.exports = { uploadVideo, uploadApk, getVideoStream, deleteVideo, deleteVideos };
