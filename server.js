@@ -633,7 +633,7 @@ app.put('/api/testers/:testerId/upi', async (req, res) => {
         }
 
         const result = await db.query(
-            'UPDATE testers SET upi_id = $1 WHERE id = $2 RETURNING *',
+            'UPDATE testers SET upi_id = $1 WHERE id = $2 RETURNING id, full_name, upi_id',
             [upi_id, req.params.testerId]
         );
 
@@ -641,11 +641,137 @@ app.put('/api/testers/:testerId/upi', async (req, res) => {
             return res.status(404).json({ error: 'Tester not found' });
         }
 
-        res.json({ success: true, tester: result.rows[0] });
+        res.json({ success: true, upi_id: result.rows[0].upi_id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
+
+// ── PAYMENT ROUTES ────────────────────────────────────────────────────────────
+
+// GET /api/testers/:id/wallet — balance, earnings, next payout info
+app.get('/api/testers/:testerId/wallet', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT id, full_name, upi_id,
+                    COALESCE(total_earnings, 0)         AS total_earnings,
+                    COALESCE(total_paid, 0)             AS total_paid,
+                    COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
+             FROM testers WHERE id = $1`,
+            [req.params.testerId]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tester not found' });
+
+        // Next Sunday at 12:00 PM IST
+        const now = new Date();
+        const istOffsetMs = 5.5 * 60 * 60 * 1000;
+        const nowIST = new Date(now.getTime() + istOffsetMs);
+        const dayOfWeek = nowIST.getUTCDay(); // 0=Sun, ..., 6=Sat
+        const daysUntilSunday = dayOfWeek === 0 ? 7 : 7 - dayOfWeek;
+        const nextSunday = new Date(nowIST);
+        nextSunday.setUTCDate(nowIST.getUTCDate() + daysUntilSunday);
+        nextSunday.setUTCHours(6, 30, 0, 0); // 06:30 UTC = 12:00 IST
+
+        res.json({
+            success: true,
+            wallet: {
+                ...result.rows[0],
+                next_payout: nextSunday.toISOString(),
+                next_payout_label: 'Every Sunday at 12:00 PM IST',
+            }
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/testers/:id/payments — payment history
+app.get('/api/testers/:testerId/payments', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT * FROM payment_transactions
+             WHERE tester_id = $1
+             ORDER BY paid_at DESC
+             LIMIT 50`,
+            [req.params.testerId]
+        );
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/admin/payments/pending — all testers with pending balance
+app.get('/api/admin/payments/pending', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT id, full_name, email, phone, upi_id,
+                    COALESCE(total_earnings, 0)                              AS total_earnings,
+                    COALESCE(total_paid, 0)                                  AS total_paid,
+                    COALESCE(total_earnings, 0) - COALESCE(total_paid, 0)   AS pending,
+                    COALESCE(total_tests, 0)                                 AS total_tests
+             FROM testers
+             WHERE COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) > 0
+             ORDER BY pending DESC`
+        );
+        res.json({ success: true, testers: result.rows, total: result.rows.length });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/admin/payments/batch — mark selected (or all) testers as paid
+app.post('/api/admin/payments/batch', async (req, res) => {
+    try {
+        // Optional: pass { tester_ids: [1,2,3] } to pay specific testers only
+        const { tester_ids, note } = req.body;
+        const now = new Date();
+
+        let candidates;
+        if (tester_ids && tester_ids.length > 0) {
+            const r = await db.query(
+                `SELECT id, upi_id,
+                        COALESCE(total_earnings,0) - COALESCE(total_paid,0) AS pending
+                 FROM testers
+                 WHERE id = ANY($1::int[])
+                   AND COALESCE(total_earnings,0) - COALESCE(total_paid,0) > 0`,
+                [tester_ids]
+            );
+            candidates = r.rows;
+        } else {
+            const r = await db.query(
+                `SELECT id, upi_id,
+                        COALESCE(total_earnings,0) - COALESCE(total_paid,0) AS pending
+                 FROM testers
+                 WHERE COALESCE(total_earnings,0) - COALESCE(total_paid,0) > 0`
+            );
+            candidates = r.rows;
+        }
+
+        if (candidates.length === 0) {
+            return res.json({ success: true, paid: 0, message: 'No pending payments.' });
+        }
+
+        let totalPaid = 0;
+        for (const t of candidates) {
+            if (!t.upi_id) continue; // skip if no UPI on file
+            const amount = parseFloat(t.pending);
+            await db.query(
+                `INSERT INTO payment_transactions
+                    (tester_id, amount, upi_id, status, note, paid_at, period_end)
+                 VALUES ($1, $2, $3, 'paid', $4, $5, $5)`,
+                [t.id, amount, t.upi_id, note || null, now]
+            );
+            await db.query(
+                `UPDATE testers SET total_paid = COALESCE(total_paid,0) + $1 WHERE id = $2`,
+                [amount, t.id]
+            );
+            totalPaid += amount;
+        }
+
+        res.json({
+            success: true,
+            paid: candidates.length,
+            total_amount: totalPaid,
+            message: `Marked ${candidates.length} testers as paid (₹${totalPaid.toFixed(2)} total)`
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 
 // ===== APP VERSION / UPDATE ROUTES =====
 
