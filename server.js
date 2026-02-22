@@ -1495,3 +1495,25 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('╚═══════════════════════════════════════╝');
     console.log('');
 });
+
+// ============================================
+// KEEP-ALIVE PING
+// ============================================
+// Ping the backend every 5 minutes to prevent Render free tier from sleeping
+const PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+
+setInterval(async () => {
+    try {
+        console.log(`[Keep-Alive] Pinging ${BACKEND_URL}/api/health...`);
+        // Using built-in fetch to avoid requiring extra dependencies here
+        const response = await fetch(`${BACKEND_URL}/api/health`);
+        if (response.ok) {
+            console.log(`[Keep-Alive] Successfully pinged server (Status: ${response.status}) 🟢`);
+        } else {
+            console.log(`[Keep-Alive] Ping returned status: ${response.status} 🟡`);
+        }
+    } catch (error) {
+        console.error(`[Keep-Alive] Failed to ping server: ${error.message} 🔴`);
+    }
+}, PING_INTERVAL_MS);
