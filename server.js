@@ -837,7 +837,7 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
         res.json({
             success: true,
             // Return BOTH the full B2 proxy url and the raw B2 key for internal streaming
-            apk_url: `/api/app/download/${result.key}`,
+            apk_url: `${process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'))}/api/app/download/${result.key}`,
             message: 'APK uploaded to Backblaze B2 successfully'
         });
 
