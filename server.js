@@ -56,8 +56,8 @@ if (!API_KEY) {
 }
 
 app.use((req, res, next) => {
-    // Whitelist health check (for uptime monitors / Render)
-    if (req.path === '/api/health') return next();
+    // Whitelist health check and APK downloads (which don't have auth headers)
+    if (req.path === '/api/health' || req.path.startsWith('/api/app/download/')) return next();
 
     // If no key is configured, skip enforcement (local dev mode)
     if (!API_KEY) return next();
@@ -1531,13 +1531,17 @@ app.listen(PORT, '0.0.0.0', () => {
 // ============================================
 // Ping the backend every 5 minutes to prevent Render free tier from sleeping
 const PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
 
 setInterval(async () => {
     try {
-        console.log(`[Keep-Alive] Pinging ${BACKEND_URL}/api/health...`);
+        const pingUrl = process.env.BACKEND_URL ?
+            `${process.env.BACKEND_URL.replace(/\/$/, '')}/api/health` :
+            `http://localhost:${PORT}/api/health`;
+
+        console.log(`[Keep-Alive] Pinging ${pingUrl}...`);
+
         // Using built-in fetch to avoid requiring extra dependencies here
-        const response = await fetch(`${BACKEND_URL}/api/health`);
+        const response = await fetch(pingUrl);
         if (response.ok) {
             console.log(`[Keep-Alive] Successfully pinged server (Status: ${response.status}) 🟢`);
         } else {
