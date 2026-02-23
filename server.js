@@ -829,15 +829,14 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
 
         const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
 
-        // Delete temp file
-        if (fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-        }
+        // Clean BACKEND_URL in case user accidentally included /api/health in the env var
+        let bUrl = process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'));
+        bUrl = bUrl.replace(/\/api\/health\/?$/, '').replace(/\/$/, '');
 
         res.json({
             success: true,
             // Return BOTH the full B2 proxy url and the raw B2 key for internal streaming
-            apk_url: `${process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'))}/api/app/download/${result.key}`,
+            apk_url: `${bUrl}/api/app/download/${result.key}`,
             message: 'APK uploaded to Backblaze B2 successfully'
         });
 
@@ -1534,9 +1533,8 @@ const PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 setInterval(async () => {
     try {
-        const pingUrl = process.env.BACKEND_URL ?
-            `${process.env.BACKEND_URL.replace(/\/$/, '')}/api/health` :
-            `http://localhost:${PORT}/api/health`;
+        let bUrl = process.env.BACKEND_URL ? process.env.BACKEND_URL.replace(/\/api\/health\/?$/, '').replace(/\/$/, '') : `http://localhost:${PORT}`;
+        const pingUrl = `${bUrl}/api/health`;
 
         console.log(`[Keep-Alive] Pinging ${pingUrl}...`);
 
