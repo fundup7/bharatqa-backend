@@ -829,9 +829,9 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
 
         const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
 
-        // Clean BACKEND_URL in case user accidentally included /api/health in the env var
+        // Clean BACKEND_URL in case there's a trailing slash
         let bUrl = process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'));
-        bUrl = bUrl.replace(/\/api\/health\/?$/, '').replace(/\/$/, '');
+        bUrl = bUrl.replace(/\/$/, '');
 
         res.json({
             success: true,
@@ -1533,7 +1533,7 @@ const PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 setInterval(async () => {
     try {
-        let bUrl = process.env.BACKEND_URL ? process.env.BACKEND_URL.replace(/\/api\/health\/?$/, '').replace(/\/$/, '') : `http://localhost:${PORT}`;
+        let bUrl = process.env.BACKEND_URL ? process.env.BACKEND_URL.replace(/\/$/, '') : `http://localhost:${PORT}`;
         const pingUrl = `${bUrl}/api/health`;
 
         console.log(`[Keep-Alive] Pinging ${pingUrl}...`);
