@@ -101,12 +101,24 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
             return res.status(400).json({ error: 'company_id is required' });
         }
 
-        let apk_file_url = null, apk_file_path = null;
-
+        let apk_file_url = null, apk_file_path = null, apk_storage = 'supabase';
         if (req.file) {
-            const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
-            apk_file_url = result.url;
-            apk_file_path = result.path;
+            if (b2Storage) {
+                // Upload to Backblaze B2
+                const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
+                apk_file_path = result.key;
+                apk_storage = 'b2';
+                // URL points to proxy download endpoint
+                let bUrl = process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'));
+                bUrl = bUrl.replace(/\/$/, '');
+                apk_file_url = `${bUrl}/api/app/download/${result.key}`;
+            } else {
+                // Fallback to Supabase
+                const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
+                apk_file_url = result.url;
+                apk_file_path = result.path;
+                apk_storage = 'supabase';
+            }
             fs.unlinkSync(req.file.path);
         }
 
@@ -114,10 +126,10 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
         const tIters = testing_iterations ? parseInt(testing_iterations) : 1;
         const tPrice = price_paid ? parseFloat(price_paid) : 0;
 
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id, tester_quota, testing_iterations, price_paid, status) 
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending') RETURNING id`;
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions, company_id, tester_quota, testing_iterations, price_paid, status) 
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') RETURNING id`;
         const result = await db.query(query, [
-            company_name, app_name, apk_file_url, apk_file_path, instructions,
+            company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions,
             parseInt(company_id), tQuota, tIters, tPrice
         ]);
 
@@ -1099,15 +1111,20 @@ app.delete('/api/tests/:id', async (req, res) => {
         const testId = req.params.id;
 
         // Get files to delete
-        const test = await db.query('SELECT apk_file_path FROM tests WHERE id = $1', [testId]);
-        const bugs = await db.query('SELECT recording_path, screenshot_paths FROM bugs WHERE test_id = $1', [testId]);
+        const test = await db.query('SELECT apk_file_path, apk_storage FROM tests WHERE id = $1', [testId]);
+        const bugs = await db.query('SELECT recording_path, recording_storage, screenshot_paths FROM bugs WHERE test_id = $1', [testId]);
         const frames = await db.query(
             'SELECT frame_path FROM ai_frames WHERE bug_id IN (SELECT id FROM bugs WHERE test_id = $1)', [testId]
         );
 
-        // Delete from Supabase Storage
+        // Delete APK from Storage
         if (test.rows[0]?.apk_file_path) {
-            await storage.deleteFile('apks', test.rows[0].apk_file_path);
+            const row = test.rows[0];
+            if (row.apk_storage === 'b2' && b2Storage) {
+                await b2Storage.deleteVideo(row.apk_file_path); // Use deleteVideo or similar key-based deletion
+            } else {
+                await storage.deleteFile('apks', row.apk_file_path);
+            }
         }
 
         const recPaths = bugs.rows.filter(b => b.recording_path).map(b => b.recording_path);
