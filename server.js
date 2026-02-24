@@ -87,7 +87,7 @@ const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } }
 // Create test (linked to company)
 app.post('/api/tests', upload.single('apk'), async (req, res) => {
     try {
-        const { company_name, app_name, instructions, company_id } = req.body;
+        const { company_name, app_name, instructions, company_id, tester_quota, testing_iterations, price_paid } = req.body;
 
         // DEBUG: Log what we receive
         console.log('📦 req.body:', req.body);
@@ -110,11 +110,15 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
             fs.unlinkSync(req.file.path);
         }
 
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id) 
-                   VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`;
+        const tQuota = tester_quota ? parseInt(tester_quota) : 20;
+        const tIters = testing_iterations ? parseInt(testing_iterations) : 1;
+        const tPrice = price_paid ? parseFloat(price_paid) : 0;
+
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id, tester_quota, testing_iterations, price_paid, status) 
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending') RETURNING id`;
         const result = await db.query(query, [
             company_name, app_name, apk_file_url, apk_file_path, instructions,
-            parseInt(company_id)  // ← Force integer, not string
+            parseInt(company_id), tQuota, tIters, tPrice
         ]);
 
         console.log('✅ Test created with company_id:', parseInt(company_id));
@@ -317,11 +321,15 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
             fs.unlinkSync(req.file.path);
         }
 
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id) 
-                        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`;
+        const tQuota = tester_quota ? parseInt(tester_quota) : 20;
+        const tIters = testing_iterations ? parseInt(testing_iterations) : 1;
+        const tPrice = price_paid ? parseFloat(price_paid) : 0;
+
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id, tester_quota, testing_iterations, price_paid, status) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending') RETURNING id`;
         const result = await db.query(query, [
             company_name, app_name, apk_file_url, apk_file_path, instructions,
-            company_id || null
+            company_id || null, tQuota, tIters, tPrice
         ]);
 
         res.json({ id: result.rows[0].id, message: 'Test created!' });
@@ -344,7 +352,11 @@ app.get('/api/company/:companyId/tests', async (req, res) => {
         (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id AND lower(b.severity)='critical') AS critical_count,
         (SELECT COUNT(DISTINCT b.tester_id)::int
          FROM bugs b
-         WHERE b.test_id = t.id AND b.tester_id IS NOT NULL) AS tester_count
+         WHERE b.test_id = t.id AND b.tester_id IS NOT NULL) AS tester_count,
+        COALESCE(t.tester_quota, 20) AS tester_quota,
+        COALESCE(t.testing_iterations, 1) AS testing_iterations,
+        COALESCE(t.price_paid, 0) AS price_paid,
+        COALESCE(t.status, 'pending') AS status
       FROM tests t
       WHERE t.company_id = $1
       ORDER BY t.created_at DESC;
@@ -377,6 +389,101 @@ app.get('/api/tests/:id', async (req, res) => {
         if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
         res.json(result.rows[0]);
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================
+// ADMIN TESTS ENDPOINTS
+// ============================================
+
+// Get all tests across the platform for Admin
+app.get('/api/admin/tests', async (req, res) => {
+    try {
+        const sql = `
+      SELECT
+        t.*,
+        c.email as company_email,
+        (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id) AS bug_count,
+        (SELECT COUNT(DISTINCT b.tester_id)::int
+         FROM bugs b
+         WHERE b.test_id = t.id AND b.tester_id IS NOT NULL) AS tester_count,
+        COALESCE(t.tester_quota, 20) AS tester_quota,
+        COALESCE(t.testing_iterations, 1) AS testing_iterations,
+        COALESCE(t.price_paid, 0) AS price_paid,
+        COALESCE(t.status, 'pending') AS status
+      FROM tests t
+      LEFT JOIN companies c ON t.company_id = c.id
+      ORDER BY t.created_at DESC;
+    `;
+        const result = await db.query(sql);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Admin update test status (approve/reject/etc)
+app.put('/api/admin/tests/:testId/status', async (req, res) => {
+    try {
+        const { testId } = req.params;
+        const { status } = req.body;
+
+        if (!['pending', 'approved', 'rejected', 'in_progress', 'completed'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status' });
+        }
+
+        const result = await db.query(
+            'UPDATE tests SET status = $1 WHERE id = $2 RETURNING *',
+            [status, testId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Test not found' });
+        }
+
+        res.json({ success: true, test: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Admin assign tester manually to a test
+app.post('/api/admin/tests/:testId/assign', async (req, res) => {
+    try {
+        const { testId } = req.params;
+        const { tester_id } = req.body;
+
+        if (!tester_id) {
+            return res.status(400).json({ error: 'tester_id is required' });
+        }
+
+        // Check if tester is already assigned to this test
+        const check = await db.query(
+            'SELECT id FROM bugs WHERE test_id = $1 AND tester_id = $2 LIMIT 1',
+            [testId, tester_id]
+        );
+
+        if (check.rows.length > 0) {
+            return res.status(400).json({ error: 'Tester is already assigned to this test' });
+        }
+
+        // To assign a tester, we ideally just want them to have access. 
+        // Our existing app shows 'available tests' based on targeting or 'status=active' 
+        // and bugs table is used to track submissions. 
+        // For a direct assignment, we can insert a placeholder bug row or an assignment row if a mapping table existed.
+        // Assuming we rely on the bugs table to track interactions:
+
+        // We'll insert a "reserved" or empty bug record just to bind the tester to the test_id.
+        const result = await db.query(
+            `INSERT INTO bugs (test_id, tester_id, title, description, steps_to_reproduce, severity, status) 
+             VALUES ($1, $2, 'Assigned by Admin', 'Manual Assignment', '', 'Low', 'open') RETURNING *`,
+            [testId, tester_id]
+        );
+
+        res.json({ success: true, message: 'Tester assigned', assignment: result.rows[0] });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ============================================
