@@ -1207,6 +1207,12 @@ app.get('/api/available-tests', async (req, res) => {
         let sql = `SELECT * FROM tests WHERE status = 'active'`;
         const params = [];
 
+        // Exclude tests the tester has already submitted bugs for
+        if (tester?.id) {
+            params.push(tester.id);
+            sql += ` AND id NOT IN (SELECT DISTINCT test_id FROM bugs WHERE tester_id = $${params.length})`;
+        }
+
         if (tester) {
             // Filter tests by targeting criteria matching this tester's profile
             // A test's criteria field is NULL = open to all; otherwise must match
