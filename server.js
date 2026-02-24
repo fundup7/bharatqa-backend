@@ -105,7 +105,7 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
         if (req.file) {
             if (b2Storage) {
                 // Upload to Backblaze B2
-                const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
+                const result = await b2Storage.uploadApk(req.file.path, req.file.originalname, 'company-apks');
                 apk_file_path = result.key;
                 apk_storage = 'b2';
                 // URL points to proxy download endpoint
@@ -439,13 +439,16 @@ app.put('/api/admin/tests/:testId/status', async (req, res) => {
         const { testId } = req.params;
         const { status } = req.body;
 
-        if (!['pending', 'approved', 'rejected', 'in_progress', 'completed'].includes(status)) {
+        if (!['pending', 'approved', 'rejected', 'in_progress', 'completed', 'active'].includes(status)) {
             return res.status(400).json({ error: 'Invalid status' });
         }
 
+        // Auto-convert approved to active
+        const finalStatus = status === 'approved' ? 'active' : status;
+
         const result = await db.query(
             'UPDATE tests SET status = $1 WHERE id = $2 RETURNING *',
-            [status, testId]
+            [finalStatus, testId]
         );
 
         if (result.rows.length === 0) {
@@ -486,8 +489,8 @@ app.post('/api/admin/tests/:testId/assign', async (req, res) => {
 
         // We'll insert a "reserved" or empty bug record just to bind the tester to the test_id.
         const result = await db.query(
-            `INSERT INTO bugs (test_id, tester_id, title, description, steps_to_reproduce, severity, status) 
-             VALUES ($1, $2, 'Assigned by Admin', 'Manual Assignment', '', 'Low', 'open') RETURNING *`,
+            `INSERT INTO bugs (test_id, tester_id, tester_name, bug_title, bug_description, severity) 
+             VALUES ($1, $2, 'Assigned by Admin', 'Manual Assignment', 'Assigned by Admin manually', 'low') RETURNING *`,
             [testId, tester_id]
         );
 
@@ -946,7 +949,7 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
 
         console.log(`🚀 Uploading APK to Backblaze B2: ${req.file.originalname}`);
 
-        const result = await b2Storage.uploadApk(req.file.path, req.file.originalname);
+        const result = await b2Storage.uploadApk(req.file.path, req.file.originalname, 'app-updates');
 
         // Clean BACKEND_URL in case there's a trailing slash
         let bUrl = process.env.BACKEND_URL || (req.protocol + '://' + req.get('host'));
@@ -981,8 +984,10 @@ app.get('/api/app/download/*', async (req, res) => {
         // Use the existing video stream method in B2 since it retrieves the file object stream identically
         const response = await b2Storage.getVideoStream(b2Key);
 
+        const fileName = b2Key.split('/').pop() || 'download.apk';
+
         res.set('Content-Type', 'application/vnd.android.package-archive');
-        res.set('Content-Disposition', `attachment; filename="bharatqa_update.apk"`);
+        res.set('Content-Disposition', `attachment; filename="${fileName}"`);
         if (response.ContentLength) {
             res.set('Content-Length', response.ContentLength);
         }
@@ -1342,6 +1347,25 @@ app.post('/api/bugs', upload.fields([
             }
         }
 
+        // ✅ Check if Test Quota is met to auto-complete
+        try {
+            const quotaCheck = await db.query(`
+                SELECT 
+                    t.tester_quota,
+                    (SELECT COUNT(DISTINCT tester_id) FROM bugs WHERE test_id = $1 AND tester_id IS NOT NULL) as current_testers
+                FROM tests t WHERE t.id = $1
+            `, [test_id]);
+
+            if (quotaCheck.rows.length > 0) {
+                const { tester_quota, current_testers } = quotaCheck.rows[0];
+                if (current_testers >= tester_quota) {
+                    await db.query('UPDATE tests SET status = $1 WHERE id = $2', ['completed', test_id]);
+                    console.log(`✅ Auto-completed test #${test_id} (Quota met: ${current_testers}/${tester_quota})`);
+                }
+            }
+        } catch (quotaErr) {
+            console.error(`⚠️ Failed to check/update test completion quota: ${quotaErr.message}`);
+        }
 
 
         // ✅ Send response AFTER all DB operations

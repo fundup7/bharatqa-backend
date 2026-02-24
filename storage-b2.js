@@ -59,11 +59,19 @@ async function uploadVideo(filePath, originalName) {
 }
 
 // Upload APK to B2 (Returns a direct public URL)
-async function uploadApk(filePath, originalName) {
+async function uploadApk(filePath, originalName, folder = 'company-apks') {
     try {
         const timestamp = Date.now();
         // Always enforce .apk extension for safety
-        const key = `app-updates/bharatqa_update_${timestamp}.apk`;
+
+        let key;
+        if (folder === 'app-updates') {
+            key = `app-updates/bharatqa_update_${timestamp}.apk`;
+        } else {
+            const safeName = originalName ? originalName.replace(/[^a-zA-Z0-9.\-_]/g, '_').replace(/\.apk$/i, '') : `app`;
+            const randomStr = Math.random().toString(36).slice(2, 8);
+            key = `${folder}/${safeName}_${timestamp}_${randomStr}.apk`;
+        }
 
         if (!fs.existsSync(filePath)) {
             throw new Error(`File not found: ${filePath}`);
