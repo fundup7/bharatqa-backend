@@ -1180,7 +1180,7 @@ app.get('/api/tests/:id/download-apk', async (req, res) => {
 // TESTER ENDPOINTS
 // ============================================
 
-app.get('/api/available-tests', async (req, res) => {
+    app.get('/api/available-tests', async (req, res) => {
     try {
         const { tester_id, google_id } = req.query;
 
@@ -1203,7 +1203,7 @@ app.get('/api/available-tests', async (req, res) => {
             });
         }
 
-        // Base query for active tests
+        // Base query for active tests only (strict filtering for approved tests)
         let sql = `SELECT * FROM tests WHERE status = 'active'`;
         const params = [];
 
