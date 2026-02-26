@@ -80,7 +80,8 @@ async function runMigrations() {
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_approved BOOLEAN DEFAULT FALSE;`);
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_status TEXT DEFAULT 'pending';`);
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
-        console.log('✅ Database migration: admin columns added to bugs');
+        await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS ai_admin_context TEXT;`);
+        console.log('✅ Database migration: admin and AI columns added to bugs');
     } catch (e) {
         console.warn('⚠️ Migration notice (may already exist):', e.message);
     }
@@ -462,20 +463,30 @@ app.put('/api/admin/tests/:testId/status', async (req, res) => {
 app.put('/api/admin/tests/:testId/budget', async (req, res) => {
     try {
         const { testId } = req.params;
-        const { total_budget } = req.body;
+        const { total_budget, price_paid } = req.body;
 
-        if (total_budget === undefined) return res.status(400).json({ error: 'total_budget required' });
+        if (total_budget === undefined && price_paid === undefined) {
+            return res.status(400).json({ error: 'total_budget or price_paid required' });
+        }
 
-        // Get quota to recalculate price_paid
+        // Get quota to recalculate
         const test = await db.query('SELECT tester_quota FROM tests WHERE id = $1', [testId]);
         if (test.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
 
         const quota = test.rows[0].tester_quota || 20;
-        const pricePaid = total_budget / quota;
+
+        let finalBudget = total_budget;
+        let finalPrice = price_paid;
+
+        if (total_budget !== undefined && price_paid === undefined) {
+            finalPrice = total_budget / quota;
+        } else if (price_paid !== undefined && total_budget === undefined) {
+            finalBudget = price_paid * quota;
+        }
 
         const result = await db.query(
             'UPDATE tests SET total_budget = $1, price_paid = $2 WHERE id = $3 RETURNING *',
-            [total_budget, pricePaid, testId]
+            [finalBudget, finalPrice, testId]
         );
 
         res.json({ success: true, test: result.rows[0] });
@@ -506,11 +517,10 @@ app.put('/api/admin/bugs/:bugId/approve', async (req, res) => {
 
         const result = await db.query(
             'UPDATE bugs SET admin_approved = $1, admin_status = $2, admin_rejection_reason = $3 WHERE id = $4 RETURNING *',
-            [approved, finalStatus, reason || null, bugId]
+            [approved, finalStatus, reason || null, req.params.bugId]
         );
 
         if (result.rows.length === 0) return res.status(404).json({ error: 'Bug not found' });
-        res.json({ success: true, bug: result.rows[0] });
         res.json({ success: true, bug: result.rows[0] });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1206,24 +1216,19 @@ app.delete('/api/tests/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Approve test for company/tester visibility
-app.put('/api/admin/tests/:testId/approve', async (req, res) => {
-    try {
-        const { testId } = req.params;
-        const { approved } = req.body; // boolean
-
-        await db.query(
-            'UPDATE tests SET admin_approved = $1 WHERE id = $2',
-            [approved, testId]
-        );
-
-        res.json({ message: `Test visibility set to ${approved} ` });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
+// Get bugs for a specific test (Company View)
 app.get('/api/tests/:id/bugs', async (req, res) => {
     try {
-        const result = await db.query('SELECT * FROM bugs WHERE test_id = $1 AND admin_approved = TRUE ORDER BY created_at DESC', [req.params.id]);
+        // Explicitly exclude ai_admin_context for companies
+        const result = await db.query(
+            `SELECT id, test_id, tester_name, bug_title, bug_description, severity, 
+                    recording_url, screenshots, test_duration, device_stats, 
+                    ai_analysis, ai_model, ai_analyzed_at, created_at, status
+             FROM bugs 
+             WHERE test_id = $1 AND admin_approved = TRUE 
+             ORDER BY created_at DESC`,
+            [req.params.id]
+        );
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1271,8 +1276,8 @@ app.get('/api/available-tests', async (req, res) => {
             });
         }
 
-        // Base query for active tests only (strict filtering for approved tests)
-        let sql = `SELECT * FROM tests WHERE status = 'active' AND admin_approved = TRUE`;
+        // Base query for active tests only (Status is the single master switch)
+        let sql = `SELECT * FROM tests WHERE status = 'active'`;
         const params = [];
 
         // Exclude tests the tester has already submitted bugs for

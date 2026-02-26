@@ -205,40 +205,21 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
     // Download video (pass API key if fetching from our own backend)
     const videoPath = path.join(tempDir, 'video.mp4');
     console.log('⬇️ Downloading video...');
-    const downloadHeaders = process.env.API_KEY ? { 'x-api-key': process.env.API_KEY } : {};
-    await downloadFile(videoUrl, videoPath, downloadHeaders);
-    const fileSize = Math.round(fs.statSync(videoPath).size / 1024);
-    console.log(`✅ Downloaded: ${fileSize}KB`);
+    await downloadFile(videoUrl, videoPath);
+    console.log(`📹 Video downloaded: ${videoPath}`);
 
-    // Verify ffmpeg works
-    try {
-      const ffmpegPath = require('ffmpeg-static');
-      execSync(`chmod +x "${ffmpegPath}" 2>/dev/null || true`);
-      const ffprobePath = require('ffprobe-static').path;
-      execSync(`chmod +x "${ffprobePath}" 2>/dev/null || true`);
-    } catch (e) { /* ignore */ }
+    const raw = await extractFrames(videoPath, tempDir);
+    let analysis = null, usedModel = null;
 
-    // Duration + frames
-    const dur = await getDuration(videoPath);
-    const dMin = Math.floor(dur / 60), dSec = Math.round(dur % 60);
-    const numFrames = getFrameCount(dur);
-    console.log(`📹 ${dMin}m ${dSec}s → ${numFrames} frames`);
-
-    const framesDir = path.join(tempDir, 'frames');
-    const raw = await extractFrames(videoPath, framesDir, numFrames);
-    console.log(`📸 Extracted: ${raw.length}`);
-
-    // If frame extraction failed, try sending video URL directly to Gemini
     if (raw.length === 0) {
-      console.log('⚠️ No frames extracted, trying text-only analysis...');
-
-      const models = ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-1.5-flash-latest'];
-      let analysis = null, usedModel = null;
+      console.log('⚠️ No frames extracted, falling back to text-only analysis');
+      const dMin = 0, dSec = 0; // Fallback
+      const models = ['models/gemini-2.0-flash', 'models/gemini-1.5-flash-latest'];
 
       for (const modelName of models) {
         try {
           const model = genAI.getGenerativeModel({ model: modelName });
-          const prompt = `You are a QA expert. A tester recorded a ${dMin}m ${dSec}s mobile app test.
+          const prompt = `You are a QA expert. A tester recorded a mobile app test.
           
 Video URL (for reference): ${videoUrl}
 Bug Report: ${bugDescription || 'General testing session'}
@@ -246,135 +227,119 @@ App: ${testInfo.app_name} by ${testInfo.company_name}
 Test Instructions: ${testInfo.instructions}
 Device Stats: ${deviceStats || 'N/A'}
 
-Since I cannot show you the video frames, please provide a structured QA analysis template based on the bug report and device information:
+Since I cannot show you the video frames, please provide a structured QA analysis template:
 
 ## 🔍 App Overview
-Based on the bug report provided.
-
 ## 🐛 Issues Identified
-Analyze the reported bug description.
-
 ## ⏱️ Performance Assessment
-Based on device stats and test duration (${dMin}m ${dSec}s).
-
-## 🎯 Severity: Assess based on description
+## 🎯 Severity
 ## 💡 Top 5 Recommended Fixes
 
-Note: Frame extraction was unavailable. Analysis based on metadata only.`;
+==== INTERNAL ADMIN VERDICT ====
+## 🤖 FINAL VERDICT: [APPROVE] or [REJECT]
+INTERNAL REASONING: Explain why you chose this verdict in 2-3 sentences max.`;
 
           console.log(`🤖 ${modelName}: text-only analysis...`);
           const result = await model.generateContent(prompt);
           analysis = result.response.text();
           usedModel = modelName;
-          console.log(`✅ ${modelName}: ${analysis.length} chars`);
           break;
-        } catch (e) {
-          console.log(`⚠️ ${modelName}: ${e.message}`);
+        } catch (e) { console.log(`⚠️ ${modelName}: ${e.message}`); }
+      }
+    } else {
+      // Filter duplicates
+      const { unique, removed, freezes } = await filterDuplicates(raw);
+      let toSend = unique.length > 50 ? unique.filter((_, i) => i % Math.ceil(unique.length / 50) === 0) : unique;
+
+      const dMin = Math.floor(raw[raw.length - 1].timestamp / 60);
+      const dSec = Math.round(raw[raw.length - 1].timestamp % 60);
+
+      // Build timeline
+      let timeline = '';
+      toSend.forEach((f, i) => {
+        const m = Math.floor(f.timestamp / 60), s = Math.round(f.timestamp % 60);
+        let line = `Frame ${i + 1} [${m}:${String(s).padStart(2, '0')}]`;
+        if (i > 0) {
+          const gap = Math.round((f.timestamp - toSend[i - 1].timestamp) * 10) / 10;
+          line += ` +${gap}s`;
+          if (gap > 10) line += ' ⚠️VERY SLOW';
+          else if (gap > 5) line += ' ⚠️SLOW';
         }
-      }
+        if (f.frozenDuration) line += ` ❄️FROZEN ${f.frozenDuration}s`;
+        timeline += line + '\n';
+      });
 
-      if (analysis) {
-        await db.query(
-          'UPDATE bugs SET ai_analysis=$1, ai_model=$2, ai_analyzed_at=NOW() WHERE id=$3',
-          [analysis, usedModel + ' (text-only)', bugId]
-        );
-        console.log(`✅ Bug #${bugId} analyzed (text-only)`);
-      }
-
-      fs.rmSync(tempDir, { recursive: true, force: true });
-      return { success: !!analysis, analysis, model: usedModel, error: analysis ? null : 'All models failed' };
-    }
-
-    // Filter duplicates
-    const { unique, removed, freezes } = await filterDuplicates(raw);
-    let toSend = unique.length > 50 ? unique.filter((_, i) => i % Math.ceil(unique.length / 50) === 0) : unique;
-    console.log(`🔍 Unique: ${toSend.length}, Removed: ${removed}, Freezes: ${freezes}`);
-
-    // Build timeline
-    let timeline = '';
-    toSend.forEach((f, i) => {
-      const m = Math.floor(f.timestamp / 60), s = Math.round(f.timestamp % 60);
-      let line = `Frame ${i + 1} [${m}:${String(s).padStart(2, '0')}]`;
-      if (i > 0) {
-        const gap = Math.round((f.timestamp - toSend[i - 1].timestamp) * 10) / 10;
-        line += ` +${gap}s`;
-        if (gap > 10) line += ' ⚠️VERY SLOW';
-        else if (gap > 5) line += ' ⚠️SLOW';
-      }
-      if (f.frozenDuration) line += ` ❄️FROZEN ${f.frozenDuration}s`;
-      timeline += line + '\n';
-    });
-
-    // Stats
-    let statsText = '';
-    try {
-      const p = JSON.parse(deviceStats);
-      statsText = `Battery:${p.batteryStart}%→${p.batteryEnd}% (${p.batteryDrain}%drain) Network:${p.networkType}(${p.networkSpeed}) Device:${p.deviceModel} Android:${p.androidVersion} Duration:${p.testDuration}s Location:${p.city},${p.state}`;
-    } catch (e) { statsText = deviceStats || 'N/A'; }
-
-    // AI - FIXED MODEL NAMES
-    const models = ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-1.5-flash-latest'];
-    let analysis = null, usedModel = null;
-
-    for (const modelName of models) {
+      // Stats
+      let statsText = '';
       try {
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const images = toSend.filter(f => fs.existsSync(f.path)).map(f => ({
-          inlineData: { data: fs.readFileSync(f.path).toString('base64'), mimeType: 'image/jpeg' }
-        }));
+        const p = JSON.parse(deviceStats);
+        statsText = `Battery:${p.batteryStart}%→${p.batteryEnd}% (${p.batteryDrain}%drain) Network:${p.networkType}(${p.networkSpeed}) Device:${p.deviceModel} Android:${p.androidVersion} Duration:${p.testDuration}s Location:${p.city},${p.state}`;
+      } catch (e) { statsText = deviceStats || 'N/A'; }
 
-        const prompt = `QA expert: analyze this ${dMin}m${dSec}s mobile app test. ${images.length} unique frames (${removed} duplicates removed, ${freezes} freezes).
+      const models = ['models/gemini-2.0-flash', 'models/gemini-1.5-flash-latest'];
+      for (const modelName of models) {
+        try {
+          const model = genAI.getGenerativeModel({ model: modelName });
+          const images = toSend.filter(f => fs.existsSync(f.path)).map(f => ({
+            inlineData: { data: fs.readFileSync(f.path).toString('base64'), mimeType: 'image/jpeg' }
+          }));
 
-App: ${testInfo.app_name} by ${testInfo.company_name}
-Test Instructions: ${testInfo.instructions}
+          const prompt = `You are a Senior QA Engineer at BharatQA. Your mission is to provide an unbiased, technical analysis of this bug report recording.
 
-${timeline}
+### 🎯 TESTING CONTEXT
+- **Goal**: Verify if the tester successfully identified a functional bug while following the provided instructions.
+- **Review Area**: Cross-reference the "Test Instructions" with the tester's actions in the video.
 
-REPORT: ${bugDescription || 'None'}
-DEVICE: ${statsText}
+### 📋 BUG REPORT DATA
+- **Title**: ${bugDescription || 'No Title Provided'}
+- **Description**: ${bugDescription || 'No Description Provided'}
+- **Instructions**: ${testInfo.instructions || 'Follow standard app exploration.'}
 
-Provide:
-## 🔍 App Overview
-## 📱 User Flow (with timestamps)
-## 🐛 Bugs Found (frame # + timestamp)
-## ⏱️ Performance (analyze gaps between frames, flag >3s as slow, >5s bad, >10s critical)
+### 🔍 WHAT TO REVIEW
+1. **Instruction Adherence**: Did the tester perform the steps requested?
+2. **Visual Evidence**: Is the bug described actually visible and reproducible in the recording?
+3. **App Integrity**: Does the video show the correct app, or is it a different app/home screen?
+4. **Video Quality**: Is the video clear enough to provide the company with actionable information?
+
+### 📝 ANALYSIS FORMAT
+Please provide:
+## � Bug Reproduction Steps (Match what is seen in video)
+## 🛠️ Technical Root Cause (Hypothesize based on visual cues)
 ## 🎯 Severity: CRITICAL/HIGH/MEDIUM/LOW
 ## 💡 Top 5 Fixes
 
+==== INTERNAL ADMIN VERDICT ====
 ## 🤖 FINAL VERDICT: [APPROVE] or [REJECT]
-(Provide a definitive binary verdict based on whether the bug is valid, reproducible, and clearly demonstrated in the video. If the video is black, frozen, or doesn't show the app, choose REJECT.)`;
 
-        console.log(`🤖 ${modelName}: ${images.length} frames...`);
-        const result = await model.generateContent([prompt, ...images]);
-        analysis = result.response.text();
-        usedModel = modelName;
-        console.log(`✅ ${modelName}: ${analysis.length} chars`);
-        break;
-      } catch (e) { console.log(`⚠️ ${modelName}: ${e.message}`); }
+### ⚖️ VERDICT CRITERIA:
+- **APPROVE** if: The video clearly shows the app, the tester followed core instructions, and a valid bug/issue is demonstrated.
+- **REJECT** if: The video is black/frozen, shows the wrong app, the tester ignored instructions, or the "bug" is clearly just user error or intentional sabotage.
+
+**INTERNAL REASONING**: Explain why you chose this verdict in 2-3 sentences max. (Admins only)`;
+          console.log(`🤖 ${modelName}: ${images.length} frames...`);
+          const result = await model.generateContent([prompt, ...images]);
+          analysis = result.response.text();
+          usedModel = modelName;
+          break;
+        } catch (e) { console.log(`⚠️ ${modelName}: ${e.message}`); }
+      }
     }
 
     if (analysis) {
-      await db.query(
-        'UPDATE bugs SET ai_analysis=$1, ai_model=$2, ai_analyzed_at=NOW() WHERE id=$3',
-        [analysis, usedModel, bugId]
-      );
-
-      console.log(`☁️ Uploading ${toSend.length} frames...`);
-      for (let i = 0; i < toSend.length; i++) {
-        const f = toSend[i];
-        if (fs.existsSync(f.path)) {
-          const buf = fs.readFileSync(f.path);
-          const fname = `bug-${bugId}/frame-${String(i + 1).padStart(3, '0')}.jpg`;
-          const r = await storage.uploadBuffer(buf, 'ai-frames', fname);
-
-          await db.query(
-            `INSERT INTO ai_frames (bug_id, frame_number, frame_url, frame_path, timestamp_seconds, frame_type, frozen_duration)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [bugId, i + 1, r.url, r.path, f.timestamp, f.type || 'normal', f.frozenDuration || null]
-          );
-        }
+      // Split analysis into public and private
+      let publicReport = analysis;
+      let adminContext = "";
+      if (analysis.includes("==== INTERNAL ADMIN VERDICT ====")) {
+        const parts = analysis.split("==== INTERNAL ADMIN VERDICT ====");
+        publicReport = parts[0].trim();
+        adminContext = parts[1].trim();
       }
-      console.log(`✅ Bug #${bugId} fully analyzed & stored`);
+
+      await db.query(
+        'UPDATE bugs SET ai_analysis=$1, ai_admin_context=$2, ai_model=$3, ai_analyzed_at=NOW() WHERE id=$4',
+        [publicReport, adminContext, usedModel, bugId]
+      );
+      console.log(`✅ Bug #${bugId} analyzed & stored`);
     }
 
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -382,7 +347,7 @@ Provide:
 
   } catch (err) {
     console.error(`❌ Bug #${bugId} failed:`, err.message);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     return { success: false, error: err.message };
   }
 }
