@@ -7,6 +7,6 @@ const pool = new Pool({
 
 pool.query('SELECT NOW()')
     .then(() => console.log('✅ Database connected'))
-    .catch(err => console.error('❌ Database failed:', err.message));
+    .catch(err => console.error('❌ Database failed:', err));
 
 module.exports = pool;

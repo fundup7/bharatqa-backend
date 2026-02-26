@@ -122,6 +122,18 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
             fs.unlinkSync(req.file.path);
         }
 
+        const cId = parseInt(company_id);
+        if (isNaN(cId)) {
+            return res.status(400).json({ error: 'invalid company_id' });
+        }
+
+        // Verify company exists
+        const companyCheck = await db.query('SELECT id FROM companies WHERE id = $1', [cId]);
+        if (companyCheck.rows.length === 0) {
+            console.error(`❌ Test creation failed: Company ID ${cId} not found in database.`);
+            return res.status(404).json({ error: 'Company not found. Please log out and log back in to refresh your session.' });
+        }
+
         const tQuota = tester_quota ? parseInt(tester_quota) : 20;
         const tIters = testing_iterations ? parseInt(testing_iterations) : 1;
         const tBudget = total_budget ? parseFloat(total_budget) : 0;
@@ -132,10 +144,10 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending') RETURNING id`;
         const result = await db.query(query, [
             company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions,
-            parseInt(company_id), tQuota, tIters, tPrice, tBudget, false
+            cId, tQuota, tIters, tPrice, tBudget, false
         ]);
 
-        console.log('✅ Test created with company_id:', parseInt(company_id));
+        console.log('✅ Test created with company_id:', cId);
         res.json({ id: result.rows[0].id, message: 'Test created!' });
 
     } catch (err) {

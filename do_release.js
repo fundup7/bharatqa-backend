@@ -4,7 +4,7 @@ const axios = require('axios');
 
 const API_KEY = 'BQAnkMj6rMoWsJBLHkX4Ptt49MPw6XYTJ1zzdODqv5Cj8oL5rVQcilfP9MWxn8xxZYa';
 const BACKEND_URL = 'https://bharatqa-backend.onrender.com';
-const APK_PATH = 'D:\\BharatQA\\app\\build\\outputs\\apk\\debug\\app-debug.apk';
+const APK_PATH = 'D:\\BharatQA\\app\\build\\outputs\\apk\\release\\app-release.apk';
 
 async function uploadAndRelease() {
     try {
@@ -37,12 +37,12 @@ async function uploadAndRelease() {
 
         // Step 2: Create Release
         const releaseRes = await axios.post(`${BACKEND_URL}/api/app/release`, {
-            version_code: 6,
-            version_name: '1.5.0',
+            version_code: 7,
+            version_name: '1.6.0',
             apk_url: b2Url,
-            release_notes: 'Working on payments',
+            release_notes: 'Better UI, Payment Integration, New Dashboard',
             is_mandatory: true,
-            min_supported_version: 6
+            min_supported_version: 7
         }, {
             headers: {
                 'Content-Type': 'application/json',
