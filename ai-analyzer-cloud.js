@@ -188,6 +188,20 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
   try {
     console.log(`\n🤖 ═══ Cloud Analysis: Bug #${bugId} ═══`);
 
+    // Fetch test context
+    let testInfo = { app_name: 'Unknown', company_name: 'Unknown', instructions: 'None' };
+    try {
+      const meta = await db.query(`
+        SELECT t.instructions, t.app_name, t.company_name 
+        FROM tests t
+        JOIN bugs b ON b.test_id = t.id
+        WHERE b.id = $1
+      `, [bugId]);
+      if (meta.rows.length > 0) testInfo = meta.rows[0];
+    } catch (dbErr) {
+      console.error('⚠️ Could not fetch test context:', dbErr.message);
+    }
+
     // Download video (pass API key if fetching from our own backend)
     const videoPath = path.join(tempDir, 'video.mp4');
     console.log('⬇️ Downloading video...');
@@ -228,6 +242,8 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
           
 Video URL (for reference): ${videoUrl}
 Bug Report: ${bugDescription || 'General testing session'}
+App: ${testInfo.app_name} by ${testInfo.company_name}
+Test Instructions: ${testInfo.instructions}
 Device Stats: ${deviceStats || 'N/A'}
 
 Since I cannot show you the video frames, please provide a structured QA analysis template based on the bug report and device information:
@@ -308,6 +324,9 @@ Note: Frame extraction was unavailable. Analysis based on metadata only.`;
         }));
 
         const prompt = `QA expert: analyze this ${dMin}m${dSec}s mobile app test. ${images.length} unique frames (${removed} duplicates removed, ${freezes} freezes).
+
+App: ${testInfo.app_name} by ${testInfo.company_name}
+Test Instructions: ${testInfo.instructions}
 
 ${timeline}
 

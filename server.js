@@ -87,7 +87,7 @@ const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } }
 // Create test (linked to company)
 app.post('/api/tests', upload.single('apk'), async (req, res) => {
     try {
-        const { company_name, app_name, instructions, company_id, tester_quota, testing_iterations, price_paid } = req.body;
+        const { company_name, app_name, instructions, company_id, tester_quota, testing_iterations, price_paid, total_budget } = req.body;
 
         // DEBUG: Log what we receive
         console.log('📦 req.body:', req.body);
@@ -124,13 +124,15 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
 
         const tQuota = tester_quota ? parseInt(tester_quota) : 20;
         const tIters = testing_iterations ? parseInt(testing_iterations) : 1;
-        const tPrice = price_paid ? parseFloat(price_paid) : 0;
+        const tBudget = total_budget ? parseFloat(total_budget) : 0;
+        // Calculate per-tester price from total budget if provided
+        const tPrice = tBudget > 0 ? (tBudget / tQuota) : (price_paid ? parseFloat(price_paid) : 0);
 
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions, company_id, tester_quota, testing_iterations, price_paid, status) 
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') RETURNING id`;
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions, company_id, tester_quota, testing_iterations, price_paid, total_budget, admin_approved, status) 
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending') RETURNING id`;
         const result = await db.query(query, [
             company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions,
-            parseInt(company_id), tQuota, tIters, tPrice
+            parseInt(company_id), tQuota, tIters, tPrice, tBudget, false
         ]);
 
         console.log('✅ Test created with company_id:', parseInt(company_id));
@@ -315,42 +317,6 @@ app.get('/api/auth/profile/:companyId', async (req, res) => {
     }
 });
 
-// Create test (now linked to company)
-app.post('/api/tests', upload.single('apk'), async (req, res) => {
-    try {
-        const { company_name, app_name, instructions, company_id } = req.body;
-
-        if (!company_name || !app_name || !instructions) {
-            return res.status(400).json({ error: 'company_name, app_name, and instructions required' });
-        }
-
-        let apk_file_url = null, apk_file_path = null;
-
-        if (req.file) {
-            const result = await storage.uploadFile(req.file.path, 'apks', req.file.originalname);
-            apk_file_url = result.url;
-            apk_file_path = result.path;
-            fs.unlinkSync(req.file.path);
-        }
-
-        const tQuota = tester_quota ? parseInt(tester_quota) : 20;
-        const tIters = testing_iterations ? parseInt(testing_iterations) : 1;
-        const tPrice = price_paid ? parseFloat(price_paid) : 0;
-
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, instructions, company_id, tester_quota, testing_iterations, price_paid, status) 
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending') RETURNING id`;
-        const result = await db.query(query, [
-            company_name, app_name, apk_file_url, apk_file_path, instructions,
-            company_id || null, tQuota, tIters, tPrice
-        ]);
-
-        res.json({ id: result.rows[0].id, message: 'Test created!' });
-
-    } catch (err) {
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        res.status(500).json({ error: err.message });
-    }
-});
 
 // Get tests for a specific company
 app.get('/api/company/:companyId/tests', async (req, res) => {
@@ -370,7 +336,7 @@ app.get('/api/company/:companyId/tests', async (req, res) => {
         COALESCE(t.price_paid, 0) AS price_paid,
         COALESCE(t.status, 'pending') AS status
       FROM tests t
-      WHERE t.company_id = $1
+      WHERE t.company_id = $1 AND t.admin_approved = TRUE
       ORDER BY t.created_at DESC;
     `;
 
@@ -421,6 +387,8 @@ app.get('/api/admin/tests', async (req, res) => {
         COALESCE(t.tester_quota, 20) AS tester_quota,
         COALESCE(t.testing_iterations, 1) AS testing_iterations,
         COALESCE(t.price_paid, 0) AS price_paid,
+        COALESCE(t.total_budget, 0) AS total_budget,
+        COALESCE(t.admin_approved, FALSE) AS admin_approved,
         COALESCE(t.status, 'pending') AS status
       FROM tests t
       LEFT JOIN companies c ON t.company_id = c.id
@@ -1143,13 +1111,27 @@ app.delete('/api/tests/:id', async (req, res) => {
 
         const framePaths = frames.rows.map(f => f.frame_path);
         if (framePaths.length > 0) await storage.deleteFiles('ai-frames', framePaths);
-
         // Delete from database (CASCADE handles bugs + ai_frames)
         await db.query('DELETE FROM earnings WHERE test_id = $1', [testId]);
         await db.query('DELETE FROM tests WHERE id = $1', [testId]);
 
         res.json({ message: 'Test and all data deleted' });
 
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Approve test for company/tester visibility
+app.put('/api/admin/tests/:testId/approve', async (req, res) => {
+    try {
+        const { testId } = req.params;
+        const { approved } = req.body; // boolean
+
+        await db.query(
+            'UPDATE tests SET admin_approved = $1 WHERE id = $2',
+            [approved, testId]
+        );
+
+        res.json({ message: `Test visibility set to ${approved}` });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1180,7 +1162,7 @@ app.get('/api/tests/:id/download-apk', async (req, res) => {
 // TESTER ENDPOINTS
 // ============================================
 
-    app.get('/api/available-tests', async (req, res) => {
+app.get('/api/available-tests', async (req, res) => {
     try {
         const { tester_id, google_id } = req.query;
 
@@ -1204,7 +1186,7 @@ app.get('/api/tests/:id/download-apk', async (req, res) => {
         }
 
         // Base query for active tests only (strict filtering for approved tests)
-        let sql = `SELECT * FROM tests WHERE status = 'active'`;
+        let sql = `SELECT * FROM tests WHERE status = 'active' AND admin_approved = TRUE`;
         const params = [];
 
         // Exclude tests the tester has already submitted bugs for
@@ -1649,34 +1631,25 @@ app.get('/api/admin/all-bugs', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/health', async (req, res) => {
-    let dbOk = false;
-    try { await db.query('SELECT 1'); dbOk = true; } catch (e) { }
+app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
+        uptime: process.uptime(),
         timestamp: new Date().toISOString(),
-        database: dbOk ? 'connected' : 'disconnected',
-        ai_enabled: !!process.env.GEMINI_API_KEY,
-        storage: 'supabase'
+        version: '1.2.0-phase3'
     });
 });
 
 // ============================================
 // START
 // ============================================
-
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log('');
+    console.log('🚀 Server running on port ' + PORT);
     console.log('╔═══════════════════════════════════════╗');
     console.log('║      BharatQA Cloud Backend ☁️         ║');
-    console.log('╠═══════════════════════════════════════╣');
-    console.log(`║  Port:    ${PORT}                            ║`);
-    console.log(`║  DB:      ${process.env.DATABASE_URL ? '🟢 Supabase' : '🔴 Not set'}               ║`);
-    console.log(`║  Storage: ${process.env.SUPABASE_URL ? '🟢 Supabase' : '🔴 Not set'}               ║`);
-    console.log(`║  AI:      ${process.env.GEMINI_API_KEY ? '🟢 Gemini' : '🔴 No key'}                ║`);
     console.log('╚═══════════════════════════════════════╝');
-    console.log('');
 });
 
 // ============================================
