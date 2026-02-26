@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config(); // BharatQA Backend
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -78,7 +78,9 @@ async function runMigrations() {
     try {
         // Add admin_approved to bugs
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_approved BOOLEAN DEFAULT FALSE;`);
-        console.log('✅ Database migration: admin_approved added to bugs');
+        await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_status TEXT DEFAULT 'pending';`);
+        await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
+        console.log('✅ Database migration: admin columns added to bugs');
     } catch (e) {
         console.warn('⚠️ Migration notice (may already exist):', e.message);
     }
@@ -406,6 +408,7 @@ app.get('/api/admin/tests', async (req, res) => {
 SELECT
 t.*,
     c.email as company_email,
+    c.picture as company_logo,
     (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id) AS bug_count,
         (SELECT COUNT(DISTINCT b.tester_id):: int
          FROM bugs b
@@ -485,9 +488,10 @@ app.put('/api/admin/tests/:testId/budget', async (req, res) => {
 app.get('/api/admin/bugs/pending', async (req, res) => {
     try {
         const result = await db.query(
-            `SELECT b.*, t.app_name, t.company_name FROM bugs b 
+            `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions FROM bugs b 
              LEFT JOIN tests t ON b.test_id = t.id 
-             WHERE b.admin_approved = FALSE ORDER BY b.created_at DESC`
+             WHERE b.admin_approved = FALSE AND (b.admin_status IS NULL OR b.admin_status = 'pending')
+             ORDER BY b.created_at DESC`
         );
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -496,15 +500,17 @@ app.get('/api/admin/bugs/pending', async (req, res) => {
 // Admin approve bug
 app.put('/api/admin/bugs/:bugId/approve', async (req, res) => {
     try {
-        const { bugId } = req.params;
-        const { approved } = req.body; // boolean
+        const { approved, status, reason } = req.body; // boolean, string, string
+
+        const finalStatus = status || (approved ? 'approved' : 'rejected');
 
         const result = await db.query(
-            'UPDATE bugs SET admin_approved = $1 WHERE id = $2 RETURNING *',
-            [approved, bugId]
+            'UPDATE bugs SET admin_approved = $1, admin_status = $2, admin_rejection_reason = $3 WHERE id = $4 RETURNING *',
+            [approved, finalStatus, reason || null, bugId]
         );
 
         if (result.rows.length === 0) return res.status(404).json({ error: 'Bug not found' });
+        res.json({ success: true, bug: result.rows[0] });
         res.json({ success: true, bug: result.rows[0] });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });

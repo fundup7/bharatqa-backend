@@ -339,7 +339,10 @@ Provide:
 ## 🐛 Bugs Found (frame # + timestamp)
 ## ⏱️ Performance (analyze gaps between frames, flag >3s as slow, >5s bad, >10s critical)
 ## 🎯 Severity: CRITICAL/HIGH/MEDIUM/LOW
-## 💡 Top 5 Fixes`;
+## 💡 Top 5 Fixes
+
+## 🤖 FINAL VERDICT: [APPROVE] or [REJECT]
+(Provide a definitive binary verdict based on whether the bug is valid, reproducible, and clearly demonstrated in the video. If the video is black, frozen, or doesn't show the app, choose REJECT.)`;
 
         console.log(`🤖 ${modelName}: ${images.length} frames...`);
         const result = await model.generateContent([prompt, ...images]);
