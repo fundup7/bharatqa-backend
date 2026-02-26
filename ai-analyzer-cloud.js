@@ -181,7 +181,7 @@ async function filterDuplicates(frames) {
   return { unique, removed, freezes };
 }
 
-async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
+async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, apiKey) {
   const tempDir = path.join(__dirname, 'temp-analysis', `bug-${bugId}`);
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
@@ -205,7 +205,7 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription) {
     // Download video (pass API key if fetching from our own backend)
     const videoPath = path.join(tempDir, 'video.mp4');
     console.log('⬇️ Downloading video...');
-    await downloadFile(videoUrl, videoPath);
+    await downloadFile(videoUrl, videoPath, { 'x-api-key': apiKey });
     console.log(`📹 Video downloaded: ${videoPath}`);
 
     const raw = await extractFrames(videoPath, tempDir);

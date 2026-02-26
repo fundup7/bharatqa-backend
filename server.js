@@ -77,6 +77,7 @@ app.use((req, res, next) => {
 async function runMigrations() {
     try {
         // Add admin_approved to bugs
+        await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';`);
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_approved BOOLEAN DEFAULT FALSE;`);
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_status TEXT DEFAULT 'pending';`);
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
@@ -1022,7 +1023,7 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
         res.json({
             success: true,
             // Return BOTH the full B2 proxy url and the raw B2 key for internal streaming
-            apk_url: `${bUrl} /api/app / download / ${result.key} `,
+            apk_url: `${bUrl}/api/app/download/${result.key}`,
             message: 'APK uploaded to Backblaze B2 successfully'
         });
 
@@ -1344,7 +1345,7 @@ app.post('/api/bugs', upload.fields([
                 recording_path = result.path;
                 recording_storage = 'b2';
                 // URL points to our proxy endpoint
-                recording_url = `/ api / videos / ${null} `; // Will update after insert
+                recording_url = `/api/videos/${null}`; // Will update after insert
                 console.log(`📹 Video → B2: ${(file.size / 1024 / 1024).toFixed(1)} MB`);
             } else {
                 // Fallback to Supabase
@@ -1398,7 +1399,7 @@ app.post('/api/bugs', upload.fields([
 
         // Update recording URL to point to proxy (for B2 videos)
         if (recording_storage === 'b2') {
-            const proxyUrl = `/ api / videos / ${bugId} `;
+            const proxyUrl = `/api/videos/${bugId}`;
             await db.query(
                 'UPDATE bugs SET recording_url = $1 WHERE id = $2',
                 [proxyUrl, bugId]
@@ -1456,10 +1457,10 @@ t.tester_quota,
             const backendBase = process.env.BACKEND_URL || 'https://bharatqa-backend.onrender.com';
             const fullVideoUrl = recording_url.startsWith('http')
                 ? recording_url
-                : `${backendBase}${recording_url} `;
-            console.log(`🤖 Auto - analysis starting for bug #${bugId}... (${fullVideoUrl})`);
-            analyzeBugReport(bugId, fullVideoUrl, device_stats, bug_description)
-                .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error} `))
+                : `${backendBase}${recording_url}`;
+            console.log(`🤖 Auto-analysis starting for bug #${bugId}... (${fullVideoUrl})`);
+            analyzeBugReport(bugId, fullVideoUrl, device_stats, bug_description, API_KEY)
+                .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error}`))
                 .catch(e => console.error('Analysis error:', e.message));
         }
 
@@ -1526,8 +1527,8 @@ app.post('/api/bugs/:id/analyze', async (req, res) => {
         const backendBase = process.env.BACKEND_URL || 'https://bharatqa-backend.onrender.com';
         const fullVideoUrl = b.recording_url.startsWith('http')
             ? b.recording_url
-            : `${backendBase}${b.recording_url} `;
-        analyzeBugReport(b.id, fullVideoUrl, JSON.stringify(b.device_stats), b.bug_description)
+            : `${backendBase}${b.recording_url}`;
+        analyzeBugReport(b.id, fullVideoUrl, JSON.stringify(b.device_stats), b.bug_description, API_KEY)
             .catch(e => console.error('Analysis error:', e.message));
 
     } catch (err) { res.status(500).json({ error: err.message }); }
