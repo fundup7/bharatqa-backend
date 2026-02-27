@@ -114,31 +114,47 @@ function extractFrames(videoPath, outDir, count) {
         Math.floor(start + (i / (count - 1)) * range)
       ))];
 
-      let done = 0;
-      const frames = [];
-
       if (times.length === 0) return resolve([]);
 
-      times.forEach((t, i) => {
-        const out = path.join(outDir, `frame_${String(i).padStart(3, '0')}.jpg`);
-        ffmpeg(videoPath)
-          .seekInput(t)
-          .frames(1)
-          .output(out)
-          .size('360x640')
-          .on('end', () => {
-            if (fs.existsSync(out) && fs.statSync(out).size > 500)
-              frames.push({ path: out, timestamp: t });
-            done++;
-            if (done === times.length) resolve(frames.sort((a, b) => a.timestamp - b.timestamp));
-          })
-          .on('error', (e) => {
-            console.log(`⚠️ Frame ${i} error: ${e.message}`);
-            done++;
-            if (done === times.length) resolve(frames.sort((a, b) => a.timestamp - b.timestamp));
-          })
-          .run();
-      });
+      let done = 0;
+      const frames = [];
+      const CONCURRENCY_LIMIT = 3;
+      let currentIndex = 0;
+
+      const runNext = () => {
+        if (done === times.length) {
+          return resolve(frames.sort((a, b) => a.timestamp - b.timestamp));
+        }
+
+        if (currentIndex < times.length) {
+          const i = currentIndex++;
+          const t = times[i];
+          const out = path.join(outDir, `frame_${String(i).padStart(3, '0')}.jpg`);
+
+          ffmpeg(videoPath)
+            .seekInput(t)
+            .frames(1)
+            .output(out)
+            .size('360x640')
+            .on('end', () => {
+              if (fs.existsSync(out) && fs.statSync(out).size > 500)
+                frames.push({ path: out, timestamp: t });
+              done++;
+              runNext();
+            })
+            .on('error', (e) => {
+              console.log(`⚠️ Frame ${i} error: ${e.message}`);
+              done++;
+              runNext();
+            })
+            .run();
+        }
+      };
+
+      // Start initial batch
+      for (let j = 0; j < Math.min(CONCURRENCY_LIMIT, times.length); j++) {
+        runNext();
+      }
     });
   });
 }
@@ -208,7 +224,9 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
     await downloadFile(videoUrl, videoPath, { 'x-api-key': apiKey });
     console.log(`📹 Video downloaded: ${videoPath}`);
 
-    const raw = await extractFrames(videoPath, tempDir);
+    const dur = await getDuration(videoPath);
+    const frameCount = getFrameCount(dur);
+    const raw = await extractFrames(videoPath, tempDir, frameCount);
     let analysis = null, usedModel = null;
 
     if (raw.length === 0) {
