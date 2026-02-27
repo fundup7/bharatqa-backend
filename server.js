@@ -1417,43 +1417,48 @@ app.post('/api/bugs', upload.fields([
         // ✅ Update tester stats BEFORE sending response
         if (tester_google_id) {
             try {
+                // Fetch actual price for this test
+                const testPriceRes = await db.query('SELECT price_paid FROM tests WHERE id = $1', [test_id]);
+                const actualPrice = parseFloat(testPriceRes.rows[0]?.price_paid || 0);
+
                 await db.query(`
                     UPDATE testers 
                     SET total_tests = total_tests + 1,
-    total_earnings = total_earnings + 50,
-    last_active = NOW()
+                        total_earnings = total_earnings + $2,
+                        last_active = NOW()
                     WHERE google_id = $1
-    `, [tester_google_id]);
-                console.log(`✅ Updated stats for tester: ${tester_google_id} `);
+                `, [tester_google_id, actualPrice]);
+
+                console.log(`✅ Updated stats for tester: ${tester_google_id} (Earned: ₹${actualPrice})`);
+
+                // ✅ Send response AFTER all DB operations
+                res.json({ id: bugId, message: 'Bug report submitted!', earned: actualPrice });
             } catch (statsErr) {
-                console.error(`⚠️ Failed to update tester stats: ${statsErr.message} `);
-                // Don't fail the whole request — bug was already saved
+                console.error(`⚠️ Failed to update tester stats: ${statsErr.message}`);
+                res.json({ id: bugId, message: 'Bug report submitted!', earned: 0 });
             }
+        } else {
+            res.json({ id: bugId, message: 'Bug report submitted!', earned: 0 });
         }
 
         // ✅ Check if Test Quota is met to auto-complete
         try {
             const quotaCheck = await db.query(`
-SELECT
-t.tester_quota,
-    (SELECT COUNT(DISTINCT tester_id) FROM bugs WHERE test_id = $1 AND tester_id IS NOT NULL) as current_testers
+                SELECT t.tester_quota,
+                (SELECT COUNT(DISTINCT tester_id) FROM bugs WHERE test_id = $1 AND tester_id IS NOT NULL) as current_testers
                 FROM tests t WHERE t.id = $1
-    `, [test_id]);
+            `, [test_id]);
 
             if (quotaCheck.rows.length > 0) {
                 const { tester_quota, current_testers } = quotaCheck.rows[0];
                 if (current_testers >= tester_quota) {
                     await db.query('UPDATE tests SET status = $1 WHERE id = $2', ['completed', test_id]);
-                    console.log(`✅ Auto - completed test #${test_id} (Quota met: ${current_testers}/${tester_quota})`);
+                    console.log(`✅ Auto-completed test #${test_id} (Quota met: ${current_testers}/${tester_quota})`);
                 }
             }
         } catch (quotaErr) {
-            console.error(`⚠️ Failed to check / update test completion quota: ${quotaErr.message} `);
+            console.error(`⚠️ Failed to check/update test completion quota: ${quotaErr.message}`);
         }
-
-
-        // ✅ Send response AFTER all DB operations
-        res.json({ id: bugId, message: 'Bug report submitted!', earned: 50 });
 
         // Auto AI analysis (fire-and-forget AFTER response)
         if (recording_url && process.env.GEMINI_API_KEY) {
@@ -1570,6 +1575,25 @@ app.get('/api/earnings/:tester_name', async (req, res) => {
         const pending = result.rows.filter(r => r.status === 'pending').reduce((s, r) => s + parseFloat(r.amount), 0);
         res.json({ total_earned: total, pending_amount: pending, tests_completed: result.rows.length, earnings: result.rows });
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/testers/:testerId/activities — detailed submission history
+app.get('/api/testers/:testerId/activities', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT 
+                b.id, b.test_id, b.status, b.created_at,
+                t.app_name, t.company_name, t.instructions, t.price_paid as amount
+             FROM bugs b
+             JOIN tests t ON b.test_id = t.id
+             WHERE b.tester_id = $1
+             ORDER BY b.created_at DESC`,
+            [req.params.testerId]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ============================================
