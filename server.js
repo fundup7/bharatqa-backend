@@ -76,15 +76,21 @@ app.use((req, res, next) => {
 // ============================================
 async function runMigrations() {
     try {
-        // Add admin_approved to bugs
+        // Core status consolidation for BUGS
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';`);
-        await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_approved BOOLEAN DEFAULT FALSE;`);
-        await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_status TEXT DEFAULT 'pending';`);
+        await db.query(`UPDATE bugs SET status = 'approved' WHERE admin_approved = TRUE AND status = 'pending';`);
+        await db.query(`UPDATE bugs SET status = 'rejected' WHERE admin_status = 'rejected' AND status = 'pending';`);
+
+        // Core status consolidation for TESTS
+        await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending-approval';`);
+        await db.query(`UPDATE tests SET status = 'active' WHERE admin_approved = TRUE AND status = 'pending-approval';`);
+
+        // Other columns
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS ai_admin_context TEXT;`);
-        console.log('✅ Database migration: admin and AI columns added to bugs');
+        console.log('✅ Database migration: Status fields consolidated and columns checked');
     } catch (e) {
-        console.warn('⚠️ Migration notice (may already exist):', e.message);
+        console.warn('⚠️ Migration notice:', e.message);
     }
 }
 runMigrations();
@@ -403,28 +409,26 @@ app.get('/api/tests/:id', async (req, res) => {
 // ADMIN TESTS ENDPOINTS
 // ============================================
 
-// Get all tests across the platform for Admin
 app.get('/api/admin/tests', async (req, res) => {
     try {
         const sql = `
-SELECT
-t.*,
-    c.email as company_email,
-    c.picture as company_logo,
-    (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id) AS bug_count,
-        (SELECT COUNT(DISTINCT b.tester_id):: int
+      SELECT
+        t.*,
+        c.email as company_email,
+        c.picture as company_logo,
+        (SELECT COUNT(*)::int FROM bugs b WHERE b.test_id = t.id) AS bug_count,
+        (SELECT COUNT(DISTINCT b.tester_id)::int
          FROM bugs b
          WHERE b.test_id = t.id AND b.tester_id IS NOT NULL) AS tester_count,
-    COALESCE(t.tester_quota, 20) AS tester_quota,
+        COALESCE(t.tester_quota, 20) AS tester_quota,
         COALESCE(t.testing_iterations, 1) AS testing_iterations,
-            COALESCE(t.price_paid, 0) AS price_paid,
-                COALESCE(t.total_budget, 0) AS total_budget,
-                    COALESCE(t.admin_approved, FALSE) AS admin_approved,
-                        COALESCE(t.status, 'pending') AS status
+        COALESCE(t.price_paid, 0) AS price_paid,
+        COALESCE(t.total_budget, 0) AS total_budget,
+        COALESCE(t.status, 'pending-approval') AS status
       FROM tests t
       LEFT JOIN companies c ON t.company_id = c.id
       ORDER BY t.created_at DESC;
-`;
+    `;
         const result = await db.query(sql);
         res.json(result.rows);
     } catch (err) {
@@ -502,7 +506,7 @@ app.get('/api/admin/bugs/pending', async (req, res) => {
         const result = await db.query(
             `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions FROM bugs b 
              LEFT JOIN tests t ON b.test_id = t.id 
-             WHERE b.admin_approved = FALSE AND (b.admin_status IS NULL OR b.admin_status = 'pending')
+             WHERE b.status = 'pending'
              ORDER BY b.created_at DESC`
         );
         res.json(result.rows);
@@ -512,13 +516,13 @@ app.get('/api/admin/bugs/pending', async (req, res) => {
 // Admin approve bug
 app.put('/api/admin/bugs/:bugId/approve', async (req, res) => {
     try {
-        const { approved, status, reason } = req.body; // boolean, string, string
+        const { status, reason } = req.body;
 
-        const finalStatus = status || (approved ? 'approved' : 'rejected');
+        if (!status) return res.status(400).json({ error: 'Status is required' });
 
         const result = await db.query(
-            'UPDATE bugs SET admin_approved = $1, admin_status = $2, admin_rejection_reason = $3 WHERE id = $4 RETURNING *',
-            [approved, finalStatus, reason || null, req.params.bugId]
+            'UPDATE bugs SET status = $1, admin_rejection_reason = $2 WHERE id = $3 RETURNING *',
+            [status, reason || null, req.params.bugId]
         );
 
         if (result.rows.length === 0) return res.status(404).json({ error: 'Bug not found' });
@@ -1226,7 +1230,7 @@ app.get('/api/tests/:id/bugs', async (req, res) => {
                     recording_url, screenshots, test_duration, device_stats, 
                     ai_analysis, ai_model, ai_analyzed_at, created_at, status
              FROM bugs 
-             WHERE test_id = $1 AND admin_approved = TRUE 
+             WHERE test_id = $1 AND status = 'approved' 
              ORDER BY created_at DESC`,
             [req.params.id]
         );
