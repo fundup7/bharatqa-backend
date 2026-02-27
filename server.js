@@ -78,12 +78,12 @@ async function runMigrations() {
     try {
         // Core status consolidation for BUGS
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';`);
-        await db.query(`UPDATE bugs SET status = 'approved' WHERE admin_approved = TRUE AND status = 'pending';`);
-        await db.query(`UPDATE bugs SET status = 'rejected' WHERE admin_status = 'rejected' AND status = 'pending';`);
+        await db.query(`UPDATE bugs SET status = 'approved' WHERE status = 'pending' AND id IN (SELECT id FROM bugs WHERE status IS NULL);`);
+        await db.query(`UPDATE bugs SET status = 'rejected' WHERE status = 'pending' AND admin_rejection_reason IS NOT NULL;`);
 
         // Core status consolidation for TESTS
         await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending-approval';`);
-        await db.query(`UPDATE tests SET status = 'active' WHERE admin_approved = TRUE AND status = 'pending-approval';`);
+        await db.query(`UPDATE tests SET status = 'active' WHERE status = 'pending-approval' AND id IN (SELECT id FROM tests WHERE status IS NULL);`);
 
         // Other columns
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
@@ -164,11 +164,11 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
         // Calculate per-tester price from total budget if provided
         const tPrice = tBudget > 0 ? (tBudget / tQuota) : (price_paid ? parseFloat(price_paid) : 0);
 
-        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions, company_id, tester_quota, testing_iterations, price_paid, total_budget, admin_approved, status) 
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending-approval') RETURNING id`;
+        const query = `INSERT INTO tests (company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions, company_id, tester_quota, testing_iterations, price_paid, total_budget, status) 
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending-approval') RETURNING id`;
         const result = await db.query(query, [
             company_name, app_name, apk_file_url, apk_file_path, apk_storage, instructions,
-            cId, tQuota, tIters, tPrice, tBudget, false
+            cId, tQuota, tIters, tPrice, tBudget
         ]);
 
         console.log('✅ Test created with company_id:', cId);
