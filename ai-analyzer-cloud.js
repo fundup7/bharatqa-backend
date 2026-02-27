@@ -214,7 +214,7 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
     if (raw.length === 0) {
       console.log('⚠️ No frames extracted, falling back to text-only analysis');
       const dMin = 0, dSec = 0; // Fallback
-      const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-flash-latest'];
+      const models = ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-1.5-flash-latest'];
 
       for (const modelName of models) {
         try {
@@ -276,7 +276,7 @@ INTERNAL REASONING: Explain why you chose this verdict in 2-3 sentences max.`;
         statsText = `Battery:${p.batteryStart}%→${p.batteryEnd}% (${p.batteryDrain}%drain) Network:${p.networkType}(${p.networkSpeed}) Device:${p.deviceModel} Android:${p.androidVersion} Duration:${p.testDuration}s Location:${p.city},${p.state}`;
       } catch (e) { statsText = deviceStats || 'N/A'; }
 
-      const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-flash-latest'];
+      const models = ['models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-1.5-flash-latest'];
       for (const modelName of models) {
         try {
           const model = genAI.getGenerativeModel({ model: modelName });
