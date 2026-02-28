@@ -5,6 +5,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process'); // ← Add this
+const crypto = require('crypto');
 
 
 // Video storage — Backblaze B2 (private bucket, 10GB free)
@@ -57,7 +58,7 @@ if (!API_KEY) {
 
 app.use((req, res, next) => {
     // Whitelist health check and APK downloads (which don't have auth headers)
-    if (req.path === '/api/health' || req.path.startsWith('/api/app/download/')) return next();
+    if (req.path === '/api/health' || req.path.startsWith('/api/app/download/') || req.path.startsWith('/api/shared/tests/')) return next();
 
     // If no key is configured, skip enforcement (local dev mode)
     if (!API_KEY) return next();
@@ -84,6 +85,8 @@ async function runMigrations() {
         // Core status consolidation for TESTS
         await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending-approval';`);
         await db.query(`UPDATE tests SET status = 'active' WHERE status = 'pending-approval' AND id IN (SELECT id FROM tests WHERE status IS NULL);`);
+        await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS share_token TEXT;`);
+        await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS share_expires_at TIMESTAMP;`);
 
         // Other columns
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
@@ -107,6 +110,70 @@ const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } }
 // ============================================
 // COMPANY ENDPOINTS
 // ============================================
+
+// Share test results (generate token)
+app.post('/api/tests/:testId/share', async (req, res) => {
+    try {
+        const { testId } = req.params;
+
+        // Generate a new UUID token
+        const token = crypto.randomUUID();
+
+        // Set expiry to 30 days from now
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30);
+
+        const result = await db.query(
+            'UPDATE tests SET share_token = $1, share_expires_at = $2 WHERE id = $3 RETURNING share_token',
+            [token, expiresAt, testId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Test not found' });
+        }
+
+        res.json({ success: true, token: result.rows[0].share_token });
+    } catch (err) {
+        console.error('Share generation error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get shared test details (public, read-only)
+app.get('/api/shared/tests/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+
+        // Find test by token where it's not expired
+        const testResult = await db.query(`
+            SELECT id, company_name, app_name, instructions, created_at, criteria, status, apk_file_url
+            FROM tests 
+            WHERE share_token = $1 AND share_expires_at > NOW()
+        `, [token]);
+
+        if (testResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Link invalid or expired' });
+        }
+
+        const test = testResult.rows[0];
+
+        // Fetch approved bugs for this test
+        const bugsResult = await db.query(
+            `SELECT id, tester_name, bug_title, bug_description, severity, 
+                    recording_url, screenshots, test_duration, device_stats, 
+                    ai_analysis, ai_model, ai_analyzed_at, created_at, status
+             FROM bugs 
+             WHERE test_id = $1 AND status = 'approved' 
+             ORDER BY created_at DESC`,
+            [test.id]
+        );
+
+        res.json({ success: true, test, bugs: bugsResult.rows });
+    } catch (err) {
+        console.error('Shared test error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // Create test (linked to company)
 app.post('/api/tests', upload.single('apk'), async (req, res) => {
@@ -432,6 +499,25 @@ app.get('/api/admin/tests', async (req, res) => {
         const result = await db.query(sql);
         res.json(result.rows);
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Admin get complete company profile for impersonation
+app.get('/api/admin/companies/:companyId', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT * FROM companies WHERE id = $1`,
+            [req.params.companyId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+
+        res.json({ success: true, company: result.rows[0] });
+    } catch (err) {
+        console.error('Admin get company error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
