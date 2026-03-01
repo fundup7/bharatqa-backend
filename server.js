@@ -120,6 +120,7 @@ app.post('/api/tests/:testId/share', async (req, res) => {
         // Generate a new UUID token
         const token = crypto.randomUUID();
 
+
         // Calculate expiry based on duration
         const expiresAt = new Date();
         if (duration === '1h') {
