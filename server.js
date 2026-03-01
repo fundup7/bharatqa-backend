@@ -739,16 +739,24 @@ company_name = $1, industry = $2, company_size = $3,
     }
 });
 
-// Delete company account
+// Delete company account (with full cascade)
 app.delete('/api/auth/company/:companyId', async (req, res) => {
     try {
         const { companyId } = req.params;
 
-        // Delete all tests owned by this company first
-        await db.query(
-            'DELETE FROM tests WHERE company_id = $1',
-            [companyId]
-        );
+        // Get all test IDs for this company
+        const testIds = await db.query('SELECT id FROM tests WHERE company_id = $1', [companyId]);
+        const ids = testIds.rows.map(r => r.id);
+
+        if (ids.length > 0) {
+            // Delete earnings for those tests
+            await db.query('DELETE FROM earnings WHERE test_id = ANY($1::int[])', [ids]);
+            // Delete bugs for those tests  
+            await db.query('DELETE FROM bugs WHERE test_id = ANY($1::int[])', [ids]);
+        }
+
+        // Delete all tests owned by this company
+        await db.query('DELETE FROM tests WHERE company_id = $1', [companyId]);
 
         // Delete the company
         const result = await db.query(
@@ -760,8 +768,8 @@ app.delete('/api/auth/company/:companyId', async (req, res) => {
             return res.status(404).json({ error: 'Company not found' });
         }
 
-        console.log(`🗑️ Account deleted: ${result.rows[0].email} `);
-        res.json({ success: true, message: 'Account deleted' });
+        console.log(`🗑️ Account deleted (full cascade): ${result.rows[0].email}`);
+        res.json({ success: true, message: 'Account and all associated data deleted' });
 
     } catch (err) {
         console.error('Delete account error:', err.message);
@@ -1281,38 +1289,47 @@ app.delete('/api/tests/:id', async (req, res) => {
     try {
         const testId = req.params.id;
 
-        // Get files to delete
+        // Get test info for APK cleanup
         const test = await db.query('SELECT apk_file_path, apk_storage FROM tests WHERE id = $1', [testId]);
-        const bugs = await db.query('SELECT recording_path, recording_storage, screenshot_paths FROM bugs WHERE test_id = $1', [testId]);
-        const frames = await db.query(
-            'SELECT frame_path FROM ai_frames WHERE bug_id IN (SELECT id FROM bugs WHERE test_id = $1)', [testId]
-        );
+        const bugs = await db.query('SELECT id, recording_path, recording_storage, screenshot_paths FROM bugs WHERE test_id = $1', [testId]);
 
         // Delete APK from Storage
         if (test.rows[0]?.apk_file_path) {
             const row = test.rows[0];
-            if (row.apk_storage === 'b2' && b2Storage) {
-                await b2Storage.deleteVideo(row.apk_file_path); // Use deleteVideo or similar key-based deletion
-            } else {
-                await storage.deleteFile('apks', row.apk_file_path);
+            try {
+                if (row.apk_storage === 'b2' && b2Storage) {
+                    await b2Storage.deleteVideo(row.apk_file_path);
+                } else {
+                    await storage.deleteFile('apks', row.apk_file_path);
+                }
+            } catch (e) { console.warn('⚠️ APK cleanup failed:', e.message); }
+        }
+
+        // Delete each bug's recordings and screenshots from correct storage
+        for (const bug of bugs.rows) {
+            if (bug.recording_path) {
+                try {
+                    if (bug.recording_storage === 'b2' && b2Storage) {
+                        await b2Storage.deleteVideo(bug.recording_path);
+                    } else {
+                        await storage.deleteFile('recordings', bug.recording_path);
+                    }
+                } catch (e) { console.warn('⚠️ Recording cleanup failed:', e.message); }
+            }
+            if (bug.screenshot_paths) {
+                try {
+                    const paths = bug.screenshot_paths.split(',').map(p => p.trim());
+                    await storage.deleteFiles('screenshots', paths);
+                } catch (e) { console.warn('⚠️ Screenshot cleanup failed:', e.message); }
             }
         }
 
-        const recPaths = bugs.rows.filter(b => b.recording_path).map(b => b.recording_path);
-        if (recPaths.length > 0) await storage.deleteFiles('recordings', recPaths);
-
-        const ssPaths = [];
-        bugs.rows.forEach(b => {
-            if (b.screenshot_paths) b.screenshot_paths.split(',').forEach(p => ssPaths.push(p.trim()));
-        });
-        if (ssPaths.length > 0) await storage.deleteFiles('screenshots', ssPaths);
-
-        const framePaths = frames.rows.map(f => f.frame_path);
-        if (framePaths.length > 0) await storage.deleteFiles('ai-frames', framePaths);
-        // Delete from database (CASCADE handles bugs + ai_frames)
+        // Delete from database — order matters for FK constraints
         await db.query('DELETE FROM earnings WHERE test_id = $1', [testId]);
+        await db.query('DELETE FROM bugs WHERE test_id = $1', [testId]);
         await db.query('DELETE FROM tests WHERE id = $1', [testId]);
 
+        console.log(`🗑️ Test #${testId} and all associated data deleted`);
         res.json({ message: 'Test and all data deleted' });
 
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1595,29 +1612,31 @@ app.delete('/api/bugs/:id', async (req, res) => {
             'SELECT recording_path, recording_storage, screenshot_paths FROM bugs WHERE id = $1',
             [bugId]
         );
-        const frames = await db.query(
-            'SELECT frame_path FROM ai_frames WHERE bug_id = $1',
-            [bugId]
-        );
+
+        if (bug.rows.length === 0) {
+            return res.status(404).json({ error: 'Bug not found' });
+        }
 
         // Delete recording from correct storage
         if (bug.rows[0]?.recording_path) {
-            if (bug.rows[0].recording_storage === 'b2' && b2Storage) {
-                await b2Storage.deleteVideo(bug.rows[0].recording_path);
-            } else {
-                await storage.deleteFile('recordings', bug.rows[0].recording_path);
-            }
+            try {
+                if (bug.rows[0].recording_storage === 'b2' && b2Storage) {
+                    await b2Storage.deleteVideo(bug.rows[0].recording_path);
+                } else {
+                    await storage.deleteFile('recordings', bug.rows[0].recording_path);
+                }
+            } catch (e) { console.warn('⚠️ Recording cleanup failed:', e.message); }
         }
 
         if (bug.rows[0]?.screenshot_paths) {
-            const paths = bug.rows[0].screenshot_paths.split(',').map(p => p.trim());
-            await storage.deleteFiles('screenshots', paths);
-        }
-        if (frames.rows.length > 0) {
-            await storage.deleteFiles('ai-frames', frames.rows.map(f => f.frame_path));
+            try {
+                const paths = bug.rows[0].screenshot_paths.split(',').map(p => p.trim());
+                await storage.deleteFiles('screenshots', paths);
+            } catch (e) { console.warn('⚠️ Screenshot cleanup failed:', e.message); }
         }
 
         await db.query('DELETE FROM bugs WHERE id = $1', [bugId]);
+        console.log(`🗑️ Bug #${bugId} deleted`);
         res.json({ message: 'Bug deleted' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1754,6 +1773,62 @@ app.delete('/api/admin/testers/:id/ban', async (req, res) => {
         if (result.rows.length === 0) return res.status(404).json({ error: 'Tester not found' });
         console.log(`✅ Tester unbanned: ${result.rows[0].full_name} `);
         res.json({ success: true, tester: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/admin/testers/:id — permanently delete a tester and all their data
+app.delete('/api/admin/testers/:id', async (req, res) => {
+    try {
+        const testerId = req.params.id;
+
+        // Check tester exists
+        const tester = await db.query('SELECT id, full_name FROM testers WHERE id = $1', [testerId]);
+        if (tester.rows.length === 0) return res.status(404).json({ error: 'Tester not found' });
+
+        const name = tester.rows[0].full_name;
+
+        // Delete all bugs submitted by this tester
+        await db.query('DELETE FROM bugs WHERE tester_id = $1', [testerId]);
+
+        // Delete earnings by tester name (earnings use tester_name, not tester_id)
+        await db.query('DELETE FROM earnings WHERE tester_name = $1', [name]);
+
+        // Delete payment transactions
+        await db.query('DELETE FROM payment_transactions WHERE tester_id = $1', [testerId]);
+
+        // Delete the tester
+        await db.query('DELETE FROM testers WHERE id = $1', [testerId]);
+
+        console.log(`🗑️ Tester #${testerId} (${name}) permanently deleted with all data`);
+        res.json({ success: true, message: `Tester ${name} and all associated data deleted` });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/admin/companies/:id — permanently delete a company with full cascade
+app.delete('/api/admin/companies/:id', async (req, res) => {
+    try {
+        const companyId = req.params.id;
+
+        // Check company exists
+        const company = await db.query('SELECT id, email, name FROM companies WHERE id = $1', [companyId]);
+        if (company.rows.length === 0) return res.status(404).json({ error: 'Company not found' });
+
+        const companyName = company.rows[0].name || company.rows[0].email;
+
+        // Get all test IDs for this company
+        const testIds = await db.query('SELECT id FROM tests WHERE company_id = $1', [companyId]);
+        const ids = testIds.rows.map(r => r.id);
+
+        if (ids.length > 0) {
+            await db.query('DELETE FROM earnings WHERE test_id = ANY($1::int[])', [ids]);
+            await db.query('DELETE FROM bugs WHERE test_id = ANY($1::int[])', [ids]);
+        }
+
+        await db.query('DELETE FROM tests WHERE company_id = $1', [companyId]);
+        await db.query('DELETE FROM companies WHERE id = $1', [companyId]);
+
+        console.log(`🗑️ Company "${companyName}" (ID: ${companyId}) permanently deleted with ${ids.length} tests`);
+        res.json({ success: true, message: `Company ${companyName} and all associated data deleted (${ids.length} tests removed)` });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
