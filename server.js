@@ -603,7 +603,7 @@ app.get('/api/admin/bugs/pending', async (req, res) => {
         const result = await db.query(
             `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions FROM bugs b 
              LEFT JOIN tests t ON b.test_id = t.id 
-             WHERE b.status = 'pending'
+             WHERE b.status = 'pending' AND b.bug_title != 'Manual Assignment'
              ORDER BY b.created_at DESC`
         );
         res.json(result.rows);
