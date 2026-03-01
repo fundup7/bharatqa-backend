@@ -115,16 +115,21 @@ const upload = multer({ dest: tempDir, limits: { fileSize: 500 * 1024 * 1024 } }
 app.post('/api/tests/:testId/share', async (req, res) => {
     try {
         const { testId } = req.params;
-        const { durationHours } = req.body;
+        const { duration } = req.body || {};
 
         // Generate a new UUID token
         const token = crypto.randomUUID();
 
-        // Interpret duration or default to 30 days
+        // Calculate expiry based on duration
         const expiresAt = new Date();
-        if (durationHours) {
-            expiresAt.setHours(expiresAt.getHours() + parseInt(durationHours, 10));
+        if (duration === '1h') {
+            expiresAt.setHours(expiresAt.getHours() + 1);
+        } else if (duration === '1d') {
+            expiresAt.setDate(expiresAt.getDate() + 1);
+        } else if (duration === '7d') {
+            expiresAt.setDate(expiresAt.getDate() + 7);
         } else {
+            // Default 30 days
             expiresAt.setDate(expiresAt.getDate() + 30);
         }
 
@@ -591,142 +596,13 @@ app.put('/api/admin/tests/:testId/budget', async (req, res) => {
     }
 });
 
-// Admin delete test project
-app.delete('/api/admin/tests/:testId', async (req, res) => {
-    try {
-        const { testId } = req.params;
-
-        await db.query('BEGIN');
-
-        // Delete all bugs associated with this test to remove foreign key dependencies
-        await db.query('DELETE FROM bugs WHERE test_id = $1', [testId]);
-
-        // Delete test
-        const result = await db.query('DELETE FROM tests WHERE id = $1 RETURNING id', [testId]);
-
-        if (result.rows.length === 0) {
-            await db.query('ROLLBACK');
-            return res.status(404).json({ error: 'Test not found' });
-        }
-
-        await db.query('COMMIT');
-        res.json({ success: true, message: 'Test project deleted successfully' });
-    } catch (err) {
-        await db.query('ROLLBACK');
-        console.error('Test deletion error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Admin override test targeting
-app.put('/api/admin/tests/:testId/targeting', async (req, res) => {
-    try {
-        const { testId } = req.params;
-        const { device_tier, network_type, min_ram_gb, max_ram_gb } = req.body;
-
-        // Fetch current criteria
-        const testRes = await db.query('SELECT criteria FROM tests WHERE id = $1', [testId]);
-        if (testRes.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
-
-        let currentCriteria = testRes.rows[0].criteria || {};
-        if (typeof currentCriteria === 'string') {
-            try { currentCriteria = JSON.parse(currentCriteria); } catch (e) { currentCriteria = {}; }
-        }
-
-        const newCriteria = {
-            ...currentCriteria,
-            device_tier: device_tier !== undefined ? device_tier : currentCriteria.device_tier,
-            network_type: network_type !== undefined ? network_type : currentCriteria.network_type,
-            min_ram_gb: min_ram_gb !== undefined ? min_ram_gb : currentCriteria.min_ram_gb,
-            max_ram_gb: max_ram_gb !== undefined ? max_ram_gb : currentCriteria.max_ram_gb
-        };
-
-        const result = await db.query(
-            'UPDATE tests SET criteria = $1 WHERE id = $2 RETURNING *',
-            [JSON.stringify(newCriteria), testId]
-        );
-
-        res.json({ success: true, test: result.rows[0] });
-    } catch (err) {
-        console.error('Targeting update error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Admin force close session
-app.delete('/api/admin/tests/:testId/sessions/:testerId', async (req, res) => {
-    try {
-        const { testId, testerId } = req.params;
-        const bugCheck = await db.query(
-            "SELECT id FROM bugs WHERE test_id = $1 AND tester_id = $2 AND (status = 'in_progress' OR status = 'pending_submission')",
-            [testId, testerId]
-        );
-
-        if (bugCheck.rows.length > 0) {
-            await db.query('DELETE FROM bugs WHERE id = $1', [bugCheck.rows[0].id]);
-            return res.json({ success: true, message: 'Session forcefully closed' });
-        } else {
-            return res.status(404).json({ error: 'No active session found for this tester on this test' });
-        }
-    } catch (err) {
-        console.error('Force close session error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Admin export specific tester payments (Earnings & Payouts combined query approach)
-app.get('/api/admin/payments/export', async (req, res) => {
-    try {
-        // Since we need to know what task/company they were paid for, we export the approved bugs
-        // joined with the payment transactions roughly, or just export the earnings list which effectively is the statement of work.
-        const query = `
-            SELECT 
-                b.tester_name,
-                t.app_name AS task_name,
-                c.company_name,
-                t.price_paid AS amount_earned,
-                b.created_at AS date_completed,
-                b.status
-            FROM bugs b
-            JOIN tests t ON b.test_id = t.id
-            JOIN companies c ON t.company_id = c.id
-            WHERE b.status = 'approved' OR b.status = 'active'
-            ORDER BY b.created_at DESC
-        `;
-        const earningsRes = await db.query(query);
-
-        const payoutsQuery = `
-            SELECT 
-                tes.full_name AS tester_name,
-                p.amount AS amount_paid,
-                p.paid_at AS date_paid,
-                p.upi_id,
-                p.note
-            FROM payment_transactions p
-            JOIN testers tes ON p.tester_id = tes.id
-            ORDER BY p.paid_at DESC
-        `;
-        let payoutsRes = { rows: [] };
-        try {
-            payoutsRes = await db.query(payoutsQuery);
-        } catch (e) {
-            console.warn("payment_transactions table might not exist or differs:", e.message);
-        }
-
-        res.json({ success: true, earnings: earningsRes.rows, payouts: payoutsRes.rows });
-    } catch (err) {
-        console.error('Export error:', err.message);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 // Admin get pending bugs
 app.get('/api/admin/bugs/pending', async (req, res) => {
     try {
         const result = await db.query(
             `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions FROM bugs b 
              LEFT JOIN tests t ON b.test_id = t.id 
-             WHERE b.status = 'pending' AND b.bug_title != 'assignment'
+             WHERE b.status = 'pending'
              ORDER BY b.created_at DESC`
         );
         res.json(result.rows);
@@ -779,7 +655,7 @@ app.post('/api/admin/tests/:testId/assign', async (req, res) => {
         // We'll insert a "reserved" or empty bug record just to bind the tester to the test_id.
         const result = await db.query(
             `INSERT INTO bugs(test_id, tester_id, tester_name, bug_title, bug_description, severity)
-        VALUES($1, $2, 'Assigned by Admin', 'Manual Assignment', 'Assigned by Admin manually', 'low') RETURNING * `,
+VALUES($1, $2, 'Assigned by Admin', 'Manual Assignment', 'Assigned by Admin manually', 'low') RETURNING * `,
             [testId, tester_id]
         );
 
@@ -799,8 +675,8 @@ app.get('/api/auth/company/:companyId', async (req, res) => {
     try {
         const result = await db.query(
             `SELECT id, email, name, picture, company_name, industry,
-            company_size, role, phone, website, referral_source,
-            onboarding_complete, created_at, last_login
+    company_size, role, phone, website, referral_source,
+    onboarding_complete, created_at, last_login
        FROM companies WHERE id = $1`,
             [req.params.companyId]
         );
@@ -839,8 +715,8 @@ app.put('/api/auth/company/:companyId', async (req, res) => {
 
         const result = await db.query(
             `UPDATE companies SET
-        company_name = $1, industry = $2, company_size = $3,
-            role = $4, phone = $5, website = $6, referral_source = $7
+company_name = $1, industry = $2, company_size = $3,
+    role = $4, phone = $5, website = $6, referral_source = $7
        WHERE id = $8 RETURNING * `,
             [company_name, industry, company_size, role,
                 phoneClean, website || null, referral_source || null, companyId]
@@ -935,24 +811,24 @@ app.post('/api/testers/register', async (req, res) => {
             // UPDATE existing user
             const result = await db.query(
                 `UPDATE testers SET
-        full_name = COALESCE($1, full_name),
-            upi_id = COALESCE($2, upi_id),
-            google_id = COALESCE($3, google_id),
-            email = COALESCE($4, email),
-            profile_picture = COALESCE($5, profile_picture),
-            device_model = COALESCE($6, device_model),
-            android_version = COALESCE($7, android_version),
-            screen_resolution = COALESCE($8, screen_resolution),
-            latitude = COALESCE($9, latitude),
-            longitude = COALESCE($10, longitude),
-            city = COALESCE($11, city),
-            state = COALESCE($12, state),
-            full_address = COALESCE($13, full_address),
-            phone = COALESCE($14, phone),
-            ram_gb = COALESCE($16, ram_gb),
-            network_type = COALESCE($17, network_type),
-            device_tier = COALESCE($18, device_tier),
-            last_active = NOW()
+full_name = COALESCE($1, full_name),
+    upi_id = COALESCE($2, upi_id),
+    google_id = COALESCE($3, google_id),
+    email = COALESCE($4, email),
+    profile_picture = COALESCE($5, profile_picture),
+    device_model = COALESCE($6, device_model),
+    android_version = COALESCE($7, android_version),
+    screen_resolution = COALESCE($8, screen_resolution),
+    latitude = COALESCE($9, latitude),
+    longitude = COALESCE($10, longitude),
+    city = COALESCE($11, city),
+    state = COALESCE($12, state),
+    full_address = COALESCE($13, full_address),
+    phone = COALESCE($14, phone),
+    ram_gb = COALESCE($16, ram_gb),
+    network_type = COALESCE($17, network_type),
+    device_tier = COALESCE($18, device_tier),
+    last_active = NOW()
                 WHERE id = $15 RETURNING * `,
                 [
                     full_name, upi_id, google_id, email, profile_picture,
@@ -968,12 +844,12 @@ app.post('/api/testers/register', async (req, res) => {
             // INSERT new user
             const result = await db.query(
                 `INSERT INTO testers(
-                full_name, phone, upi_id, google_id, email, profile_picture,
-                device_model, android_version, screen_resolution,
-                latitude, longitude, city, state, full_address,
-                ram_gb, network_type, device_tier
-            ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-        RETURNING * `,
+        full_name, phone, upi_id, google_id, email, profile_picture,
+        device_model, android_version, screen_resolution,
+        latitude, longitude, city, state, full_address,
+        ram_gb, network_type, device_tier
+    ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+RETURNING * `,
                 [
                     full_name, phoneClean, upi_id, google_id, email, profile_picture,
                     device_model, android_version, screen_resolution,
@@ -1065,9 +941,9 @@ app.get('/api/testers/:testerId/wallet', async (req, res) => {
     try {
         const result = await db.query(
             `SELECT id, full_name, upi_id,
-            COALESCE(total_earnings, 0)         AS total_earnings,
-                COALESCE(total_paid, 0)             AS total_paid,
-                    COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
+    COALESCE(total_earnings, 0)         AS total_earnings,
+        COALESCE(total_paid, 0)             AS total_paid,
+            COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
              FROM testers WHERE id = $1`,
             [req.params.testerId]
         );
@@ -1113,10 +989,10 @@ app.get('/api/admin/payments/pending', async (req, res) => {
     try {
         const result = await db.query(
             `SELECT id, full_name, email, phone, upi_id,
-            COALESCE(total_earnings, 0)                              AS total_earnings,
-                COALESCE(total_paid, 0)                                  AS total_paid,
-                    COALESCE(total_earnings, 0) - COALESCE(total_paid, 0)   AS pending,
-                        COALESCE(total_tests, 0)                                 AS total_tests
+    COALESCE(total_earnings, 0)                              AS total_earnings,
+        COALESCE(total_paid, 0)                                  AS total_paid,
+            COALESCE(total_earnings, 0) - COALESCE(total_paid, 0)   AS pending,
+                COALESCE(total_tests, 0)                                 AS total_tests
              FROM testers
              WHERE COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) > 0
              ORDER BY pending DESC`
@@ -1136,7 +1012,7 @@ app.post('/api/admin/payments/batch', async (req, res) => {
         if (tester_ids && tester_ids.length > 0) {
             const r = await db.query(
                 `SELECT id, upi_id,
-            COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
+    COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
                  FROM testers
                  WHERE id = ANY($1:: int[])
                    AND COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) > 0`,
@@ -1146,7 +1022,7 @@ app.post('/api/admin/payments/batch', async (req, res) => {
         } else {
             const r = await db.query(
                 `SELECT id, upi_id,
-            COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
+    COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) AS pending
                  FROM testers
                  WHERE COALESCE(total_earnings, 0) - COALESCE(total_paid, 0) > 0`
             );
@@ -1163,8 +1039,8 @@ app.post('/api/admin/payments/batch', async (req, res) => {
             const amount = parseFloat(t.pending);
             await db.query(
                 `INSERT INTO payment_transactions
-            (tester_id, amount, upi_id, status, note, paid_at, period_end)
-        VALUES($1, $2, $3, 'paid', $4, $5, $5)`,
+    (tester_id, amount, upi_id, status, note, paid_at, period_end)
+VALUES($1, $2, $3, 'paid', $4, $5, $5)`,
                 [t.id, amount, t.upi_id, note || null, now]
             );
             await db.query(
@@ -1247,7 +1123,7 @@ app.post('/api/app/upload-apk', upload.single('apk'), async (req, res) => {
         res.json({
             success: true,
             // Return BOTH the full B2 proxy url and the raw B2 key for internal streaming
-            apk_url: `${bUrl} /api/app / download / ${result.key} `,
+            apk_url: `${bUrl}/api/app/download/${result.key}`,
             message: 'APK uploaded to Backblaze B2 successfully'
         });
 
@@ -1446,9 +1322,9 @@ app.get('/api/tests/:id/bugs', async (req, res) => {
     try {
         // Explicitly exclude ai_admin_context for companies
         const result = await db.query(
-            `SELECT id, test_id, tester_name, bug_title, bug_description, severity,
-    recording_url, screenshots, test_duration, device_stats,
-    ai_analysis, ai_model, ai_analyzed_at, created_at, status
+            `SELECT id, test_id, tester_name, bug_title, bug_description, severity, 
+                    recording_url, screenshots, test_duration, device_stats, 
+                    ai_analysis, ai_model, ai_analyzed_at, created_at, status
              FROM bugs 
              WHERE test_id = $1 AND status = 'approved' 
              ORDER BY created_at DESC`,
@@ -1502,41 +1378,42 @@ app.get('/api/available-tests', async (req, res) => {
         }
 
         // Base query for active tests only (Status is the single master switch)
-        let sql = `
-            SELECT t.* 
-            FROM tests t
-            LEFT JOIN tester_test_assignments a ON t.id = a.test_id AND a.tester_id = $1
-            WHERE t.status = 'active'
-        `;
-        const params = [tester?.id || 0]; // param $1 is for the assignment join
-
-        // Exclude tests the tester has already submitted bugs for
-        if (tester?.id) {
-            sql += ` AND t.id NOT IN (SELECT DISTINCT test_id FROM bugs WHERE tester_id = $1)`;
-        }
+        let sql = `SELECT * FROM tests WHERE status = 'active'`;
+        const params = [];
 
         if (tester) {
-            // Filter tests by targeting criteria matching this tester's profile
-            // OR if a manual assignment exists (a.id IS NOT NULL), bypass criteria.
+            // Option D: Target Override via manual assignment
+            // A test is returned if criteria matches OR if tester is manually assigned via `bugs`
+            // Wait, manual assignments are logged in `bugs` with bug_title 'Manual Assignment'
+            // We shouldn't exclude tests if they are just manual assignments.
+
+            // Re-evaluating the exclusion: Exclude tests IF tester has submitted a real bug.
+            // If bug_title = 'Manual Assignment', they haven't submitted a real bug yet.
+            sql += ` AND id NOT IN (
+                SELECT DISTINCT test_id FROM bugs 
+                WHERE tester_id = $${params.length + 1} AND bug_title != 'Manual Assignment'
+            )`;
+
             sql += `
-AND (
-    a.id IS NOT NULL 
-    OR t.criteria IS NULL
-    OR (
-        (t.criteria->>'device_tier' IS NULL OR t.criteria->>'device_tier' = '' OR t.criteria->>'device_tier' = $2::text)
-        AND (t.criteria->>'network_type' IS NULL OR t.criteria->>'network_type' = '' OR t.criteria->>'network_type' = $3::text)
-        AND (t.criteria->>'min_ram_gb' IS NULL OR (t.criteria->>'min_ram_gb')::numeric <= $4::numeric)
-        AND (t.criteria->>'max_ram_gb' IS NULL OR (t.criteria->>'max_ram_gb')::numeric >= $4::numeric)
-        AND (t.criteria->>'allowed_states' IS NULL OR t.criteria->>'allowed_states' = '' OR t.criteria->>'allowed_states' ILIKE $5::text)
-        AND (t.criteria->>'allowed_cities' IS NULL OR t.criteria->>'allowed_cities' = '' OR t.criteria->>'allowed_cities' ILIKE $6::text)
-    )
-)`;
+              AND (
+                  id IN (SELECT test_id FROM bugs WHERE tester_id = $${params.length + 1} AND bug_title = 'Manual Assignment')
+                  OR criteria IS NULL 
+                  OR (
+                      (criteria->>'device_tier' IS NULL OR criteria->>'device_tier' = '' OR criteria->>'device_tier' = $${params.length + 2}::text)
+                      AND (criteria->>'network_type' IS NULL OR criteria->>'network_type' = '' OR criteria->>'network_type' = $${params.length + 3}::text)
+                      AND (criteria->>'min_ram_gb' IS NULL OR (criteria->>'min_ram_gb')::numeric <= $${params.length + 4}::numeric)
+                      AND (criteria->>'max_ram_gb' IS NULL OR (criteria->>'max_ram_gb')::numeric >= $${params.length + 4}::numeric)
+                      AND (criteria->>'allowed_states' IS NULL OR criteria->>'allowed_states' = '' OR criteria->>'allowed_states' ILIKE $${params.length + 5}::text)
+                      AND (criteria->>'allowed_cities' IS NULL OR criteria->>'allowed_cities' = '' OR criteria->>'allowed_cities' ILIKE $${params.length + 6}::text)
+                  )
+              )`;
             params.push(
+                tester.id,
                 tester.device_tier || '',
                 tester.network_type || '',
                 tester.ram_gb || 0,
-                `% ${tester.state || ''}% `,
-                `% ${tester.city || ''}% `
+                `%${tester.state || ''}%`,
+                `%${tester.city || ''}%`
             );
         }
 
@@ -1574,7 +1451,7 @@ app.post('/api/bugs', upload.fields([
                 recording_path = result.path;
                 recording_storage = 'b2';
                 // URL points to our proxy endpoint
-                recording_url = `/ api / videos / ${null} `; // Will update after insert
+                recording_url = `/api/videos/${null}`; // Will update after insert
                 console.log(`📹 Video → B2: ${(file.size / 1024 / 1024).toFixed(1)} MB`);
             } else {
                 // Fallback to Supabase
@@ -1628,7 +1505,7 @@ app.post('/api/bugs', upload.fields([
 
         // Update recording URL to point to proxy (for B2 videos)
         if (recording_storage === 'b2') {
-            const proxyUrl = `/ api / videos / ${bugId} `;
+            const proxyUrl = `/api/videos/${bugId}`;
             await db.query(
                 'UPDATE bugs SET recording_url = $1 WHERE id = $2',
                 [proxyUrl, bugId]
@@ -1649,17 +1526,17 @@ app.post('/api/bugs', upload.fields([
                 await db.query(`
                     UPDATE testers 
                     SET total_tests = total_tests + 1,
-    total_earnings = total_earnings + $2,
-    last_active = NOW()
+                        total_earnings = total_earnings + $2,
+                        last_active = NOW()
                     WHERE google_id = $1
-    `, [tester_google_id, actualPrice]);
+                `, [tester_google_id, actualPrice]);
 
                 console.log(`✅ Updated stats for tester: ${tester_google_id} (Earned: ₹${actualPrice})`);
 
                 // ✅ Send response AFTER all DB operations
                 res.json({ id: bugId, message: 'Bug report submitted!', earned: actualPrice });
             } catch (statsErr) {
-                console.error(`⚠️ Failed to update tester stats: ${statsErr.message} `);
+                console.error(`⚠️ Failed to update tester stats: ${statsErr.message}`);
                 res.json({ id: bugId, message: 'Bug report submitted!', earned: 0 });
             }
         } else {
@@ -1670,19 +1547,19 @@ app.post('/api/bugs', upload.fields([
         try {
             const quotaCheck = await db.query(`
                 SELECT t.tester_quota,
-    (SELECT COUNT(DISTINCT tester_id) FROM bugs WHERE test_id = $1 AND tester_id IS NOT NULL) as current_testers
+                (SELECT COUNT(DISTINCT tester_id) FROM bugs WHERE test_id = $1 AND tester_id IS NOT NULL) as current_testers
                 FROM tests t WHERE t.id = $1
-    `, [test_id]);
+            `, [test_id]);
 
             if (quotaCheck.rows.length > 0) {
                 const { tester_quota, current_testers } = quotaCheck.rows[0];
                 if (current_testers >= tester_quota) {
                     await db.query('UPDATE tests SET status = $1 WHERE id = $2', ['completed', test_id]);
-                    console.log(`✅ Auto - completed test #${test_id} (Quota met: ${current_testers}/${tester_quota})`);
+                    console.log(`✅ Auto-completed test #${test_id} (Quota met: ${current_testers}/${tester_quota})`);
                 }
             }
         } catch (quotaErr) {
-            console.error(`⚠️ Failed to check / update test completion quota: ${quotaErr.message} `);
+            console.error(`⚠️ Failed to check/update test completion quota: ${quotaErr.message}`);
         }
 
         // Auto AI analysis (fire-and-forget AFTER response)
@@ -1691,10 +1568,10 @@ app.post('/api/bugs', upload.fields([
             const backendBase = process.env.BACKEND_URL || 'https://bharatqa-backend.onrender.com';
             const fullVideoUrl = recording_url.startsWith('http')
                 ? recording_url
-                : `${backendBase}${recording_url} `;
-            console.log(`🤖 Auto - analysis starting for bug #${bugId}... (${fullVideoUrl})`);
+                : `${backendBase}${recording_url}`;
+            console.log(`🤖 Auto-analysis starting for bug #${bugId}... (${fullVideoUrl})`);
             analyzeBugReport(bugId, fullVideoUrl, device_stats, bug_description, API_KEY)
-                .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error} `))
+                .then(r => console.log(r.success ? `✅ Bug #${bugId} analyzed` : `⚠️ Analysis failed: ${r.error}`))
                 .catch(e => console.error('Analysis error:', e.message));
         }
 
@@ -1761,7 +1638,7 @@ app.post('/api/bugs/:id/analyze', async (req, res) => {
         const backendBase = process.env.BACKEND_URL || 'https://bharatqa-backend.onrender.com';
         const fullVideoUrl = b.recording_url.startsWith('http')
             ? b.recording_url
-            : `${backendBase}${b.recording_url} `;
+            : `${backendBase}${b.recording_url}`;
         analyzeBugReport(b.id, fullVideoUrl, JSON.stringify(b.device_stats), b.bug_description, API_KEY)
             .catch(e => console.error('Analysis error:', e.message));
 
@@ -1806,9 +1683,9 @@ app.get('/api/earnings/:tester_name', async (req, res) => {
 app.get('/api/testers/:testerId/activities', async (req, res) => {
     try {
         const result = await db.query(
-            `SELECT
-b.id, b.test_id, b.status, b.created_at,
-    t.app_name, t.company_name, t.instructions, t.price_paid as amount
+            `SELECT 
+                b.id, b.test_id, b.status, b.created_at,
+                t.app_name, t.company_name, t.instructions, t.price_paid as amount
              FROM bugs b
              JOIN tests t ON b.test_id = t.id
              WHERE b.tester_id = $1
@@ -1963,6 +1840,81 @@ app.get('/api/tests/:id/eligible-testers', async (req, res) => {
         sql += ' ORDER BY last_active DESC';
         const result = await db.query(sql, params);
         res.json({ success: true, count: result.rows.length, testers: result.rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================
+// ADMIN: SESSIONS & ANALYTICS (Phase 7)
+// ============================================
+
+app.get('/api/admin/active-sessions', async (req, res) => {
+    try {
+        // A tester is in an active session if they have a 'Manual Assignment' bug record
+        // AND have not submitted a legitimate bug for that test.
+        const result = await db.query(
+            `SELECT b.id as session_id, b.tester_id, t.full_name, t.email, b.test_id, 
+                    tests.app_name, tests.company_name, b.created_at as started_at
+             FROM bugs b
+             JOIN testers t ON b.tester_id = t.id
+             JOIN tests ON b.test_id = tests.id
+             WHERE b.bug_title = 'Manual Assignment' 
+             AND NOT EXISTS (
+                 SELECT 1 FROM bugs b2 
+                 WHERE b2.test_id = b.test_id 
+                 AND b2.tester_id = b.tester_id 
+                 AND b2.bug_title != 'Manual Assignment'
+             )
+             ORDER BY b.created_at DESC`
+        );
+        res.json({ success: true, sessions: result.rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/sessions/:sessionId/force-close', async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        // Simply delete the placeholder 'Manual Assignment' bug record to release the slot
+        const result = await db.query(
+            `DELETE FROM bugs WHERE id = $1 AND bug_title = 'Manual Assignment' RETURNING *`,
+            [sessionId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found or already closed' });
+        }
+        res.json({ success: true, message: 'Session forcefully closed, slot released.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/admin/payments/csv', async (req, res) => {
+    try {
+        const result = await db.query(`
+            SELECT pt.id as transaction_id, 
+                   pt.amount, 
+                   pt.upi_id, 
+                   pt.status, 
+                   pt.note, 
+                   pt.paid_at, 
+                   t.full_name as tester_name, 
+                   t.email as tester_email
+            FROM payment_transactions pt
+            LEFT JOIN testers t ON pt.tester_id = t.id
+            ORDER BY pt.paid_at DESC
+        `);
+
+        // Basic CSV formulation
+        let csv = 'Transaction ID,Tester Name,Tester Email,Amount (INR),UPI ID,Status,Note,Paid At\n';
+        result.rows.forEach(row => {
+            const date = row.paid_at ? new Date(row.paid_at).toISOString() : '';
+            // Escape quotes inside fields by replacing " with "" and wrap the whole field in "
+            const note = row.note ? `"${row.note.replace(/"/g, '""')}"` : '""';
+            const name = row.tester_name ? `"${row.tester_name.replace(/"/g, '""')}"` : '""';
+            csv += `${row.transaction_id},${name},${row.tester_email},${row.amount},${row.upi_id},${row.status},${note},${date}\n`;
+        });
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="bharatqa_payments.csv"');
+        res.send(csv);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
