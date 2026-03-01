@@ -1489,6 +1489,11 @@ app.post('/api/bugs', upload.fields([
             testerId = tr.rows[0]?.id || null;
         }
 
+        // Clean up any 'Manual Assignment' placeholder lock for this tester & test
+        if (testerId) {
+            await db.query(`DELETE FROM bugs WHERE test_id = $1 AND tester_id = $2 AND bug_title = 'Manual Assignment'`, [test_id, testerId]);
+        }
+
         const query = `INSERT INTO bugs(
     test_id, tester_name, bug_title, bug_description, severity,
     device_info, recording_url, recording_path, recording_storage,
@@ -1689,7 +1694,7 @@ app.get('/api/testers/:testerId/activities', async (req, res) => {
                 t.app_name, t.company_name, t.instructions, t.price_paid as amount
              FROM bugs b
              JOIN tests t ON b.test_id = t.id
-             WHERE b.tester_id = $1
+             WHERE b.tester_id = $1 AND b.bug_title != 'Manual Assignment'
              ORDER BY b.created_at DESC`,
             [req.params.testerId]
         );
