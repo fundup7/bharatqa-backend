@@ -1783,12 +1783,14 @@ app.get('/api/admin/testers', async (req, res) => {
         const result = await db.query(
             `SELECT id, full_name, email, phone, city, state,
     device_model, android_version, ram_gb, network_type, device_tier,
-    is_banned, ban_reason, total_tests, total_earnings, last_active, created_at
+    is_banned, ban_reason, total_tests, total_earnings, last_active, created_at,
+    fcm_token, notifications_enabled
              FROM testers ORDER BY created_at DESC`
         );
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 
 // POST /api/admin/testers/:id/ban — ban a tester
 app.post('/api/admin/testers/:id/ban', async (req, res) => {
