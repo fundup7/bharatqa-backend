@@ -43,6 +43,43 @@ const db = require('./db');
 const storage = require('./storage');
 const { analyzeBugReport } = require('./ai-analyzer-cloud');
 
+// ============================================
+// FIREBASE ADMIN SDK (Push Notifications)
+// ============================================
+let firebaseAdmin = null;
+try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        const admin = require('firebase-admin');
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        if (!admin.apps.length) {
+            admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+        }
+        firebaseAdmin = admin;
+        console.log('🔔 Firebase Admin SDK initialized — push notifications enabled');
+    } else {
+        console.warn('⚠️ FIREBASE_SERVICE_ACCOUNT_JSON not set — push notifications disabled');
+    }
+} catch (e) {
+    console.error('❌ Firebase Admin init failed:', e.message);
+}
+
+async function sendFcmNotification(token, title, body, data = {}) {
+    if (!firebaseAdmin || !token) return { success: false, reason: 'FCM not configured or no token' };
+    try {
+        const message = {
+            notification: { title, body },
+            data: { ...data },
+            android: { priority: 'high', notification: { sound: 'default' } },
+            token
+        };
+        const response = await firebaseAdmin.messaging().send(message);
+        return { success: true, messageId: response };
+    } catch (e) {
+        console.error(`FCM send error: ${e.message}`);
+        return { success: false, error: e.message };
+    }
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -87,6 +124,10 @@ async function runMigrations() {
         await db.query(`UPDATE tests SET status = 'active' WHERE status = 'pending-approval' AND id IN (SELECT id FROM tests WHERE status IS NULL);`);
         await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS share_token TEXT;`);
         await db.query(`ALTER TABLE tests ADD COLUMN IF NOT EXISTS share_expires_at TIMESTAMP;`);
+
+        // FCM / notifications
+        await db.query(`ALTER TABLE testers ADD COLUMN IF NOT EXISTS fcm_token TEXT;`);
+        await db.query(`ALTER TABLE testers ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT TRUE;`);
 
         // Other columns
         await db.query(`ALTER TABLE bugs ADD COLUMN IF NOT EXISTS admin_rejection_reason TEXT;`);
@@ -2019,6 +2060,159 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================
+// PUSH NOTIFICATION ENDPOINTS
+// ============================================
+
+// PUT /api/testers/:testerId/fcm-token — Register or refresh FCM device token
+app.put('/api/testers/:testerId/fcm-token', async (req, res) => {
+    try {
+        const { fcm_token } = req.body;
+        if (!fcm_token) return res.status(400).json({ error: 'fcm_token required' });
+        await db.query(
+            'UPDATE testers SET fcm_token = $1 WHERE id = $2',
+            [fcm_token, req.params.testerId]
+        );
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/admin/testers/:id/notifications — Enable or disable notifications for a tester
+app.put('/api/admin/testers/:id/notifications', async (req, res) => {
+    try {
+        const { enabled } = req.body;
+        if (enabled === undefined) return res.status(400).json({ error: 'enabled (boolean) required' });
+        const result = await db.query(
+            'UPDATE testers SET notifications_enabled = $1 WHERE id = $2 RETURNING id, full_name, notifications_enabled',
+            [enabled, req.params.id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Tester not found' });
+        const action = enabled ? 'enabled' : 'disabled';
+        console.log(`🔔 Notifications ${action} for tester: ${result.rows[0].full_name}`);
+        res.json({ success: true, tester: result.rows[0] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/admin/notify — Send manual push notification
+// body: { title, body, test_id? (optional — send only to eligible testers for that test), all?: true }
+app.post('/api/admin/notify', async (req, res) => {
+    try {
+        const { title, body, test_id } = req.body;
+        if (!title || !body) return res.status(400).json({ error: 'title and body required' });
+
+        if (!firebaseAdmin) {
+            return res.status(503).json({ error: 'Firebase not configured. Add FIREBASE_SERVICE_ACCOUNT_JSON to env.' });
+        }
+
+        let testerQuery;
+        let params = [];
+
+        if (test_id) {
+            // Get eligible testers for a specific test who have FCM tokens and notifications enabled
+            const testRes = await db.query('SELECT criteria FROM tests WHERE id = $1', [test_id]);
+            if (testRes.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
+
+            testerQuery = `SELECT id, fcm_token FROM testers 
+                WHERE fcm_token IS NOT NULL 
+                AND (notifications_enabled = TRUE OR notifications_enabled IS NULL)
+                AND (is_banned = FALSE OR is_banned IS NULL)`;
+        } else {
+            // All testers with tokens
+            testerQuery = `SELECT id, fcm_token FROM testers 
+                WHERE fcm_token IS NOT NULL 
+                AND (notifications_enabled = TRUE OR notifications_enabled IS NULL)
+                AND (is_banned = FALSE OR is_banned IS NULL)`;
+        }
+
+        const { rows: testers } = await db.query(testerQuery, params);
+
+        if (testers.length === 0) {
+            return res.json({ success: true, sent: 0, message: 'No eligible testers with FCM tokens' });
+        }
+
+        let sent = 0, failed = 0;
+        for (const tester of testers) {
+            const result = await sendFcmNotification(tester.fcm_token, title, body, { test_id: test_id ? String(test_id) : '' });
+            if (result.success) sent++;
+            else {
+                failed++;
+                // If the token is invalid, clear it from DB
+                if (result.error?.includes('registration-token-not-registered') || result.error?.includes('invalid-argument')) {
+                    await db.query('UPDATE testers SET fcm_token = NULL WHERE id = $1', [tester.id]);
+                }
+            }
+        }
+
+        console.log(`📢 Manual push sent: ${sent} succeeded, ${failed} failed`);
+        res.json({ success: true, sent, failed, total: testers.length });
+    } catch (err) {
+        console.error('Notify error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ============================================
+// SCHEDULED NOTIFICATIONS (9 AM & 3 PM IST)
+// ============================================
+const lastAutoNotifyDate = { '09:00': null, '15:00': null };
+
+setInterval(async () => {
+    if (!firebaseAdmin) return; // FCM not configured, skip
+
+    // Get current IST time (UTC+5:30)
+    const nowUtc = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(nowUtc.getTime() + istOffset);
+    const hh = String(istNow.getUTCHours()).padStart(2, '0');
+    const mm = String(istNow.getUTCMinutes()).padStart(2, '0');
+    const dateStr = istNow.toISOString().split('T')[0]; // YYYY-MM-DD
+    const timeKey = `${hh}:${mm}`;
+
+    // Fire at 09:00 and 15:00 IST only if not already sent today
+    if ((timeKey === '09:00' || timeKey === '15:00') && lastAutoNotifyDate[timeKey] !== dateStr) {
+        lastAutoNotifyDate[timeKey] = dateStr;
+        console.log(`🕐 Scheduled notification job firing at ${timeKey} IST on ${dateStr}`);
+
+        try {
+            // Find all active tests
+            const { rows: activeTests } = await db.query(`SELECT id, app_name FROM tests WHERE status = 'active' LIMIT 1`);
+            if (activeTests.length === 0) {
+                console.log('📭 No active tests — skipping scheduled notification');
+                return;
+            }
+
+            // Get all eligible testers with FCM tokens
+            const { rows: testers } = await db.query(`
+                SELECT id, fcm_token FROM testers 
+                WHERE fcm_token IS NOT NULL 
+                AND (notifications_enabled = TRUE OR notifications_enabled IS NULL)
+                AND (is_banned = FALSE OR is_banned IS NULL)
+            `);
+
+            if (testers.length === 0) {
+                console.log('📭 No testers with FCM tokens — skipping scheduled notification');
+                return;
+            }
+
+            const timeLabel = timeKey === '09:00' ? 'Morning' : 'Afternoon';
+            const title = `🎯 ${timeLabel} Opportunity!`;
+            const body = `New testing jobs are available. Earn money by testing apps from your phone!`;
+
+            let sent = 0;
+            for (const tester of testers) {
+                const result = await sendFcmNotification(tester.fcm_token, title, body);
+                if (result.success) sent++;
+                else if (result.error?.includes('registration-token-not-registered') || result.error?.includes('invalid-argument')) {
+                    await db.query('UPDATE testers SET fcm_token = NULL WHERE id = $1', [tester.id]);
+                }
+            }
+            console.log(`✅ Scheduled notification sent to ${sent}/${testers.length} testers`);
+        } catch (e) {
+            console.error('❌ Scheduled notification error:', e.message);
+        }
+    }
+}, 60 * 1000); // Check every minute
+
+// ============================================
 // START
 // ============================================
 const PORT = process.env.PORT || 5000;
@@ -2029,6 +2223,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('║      BharatQA Cloud Backend ☁️         ║');
     console.log('╚═══════════════════════════════════════╝');
 });
+
 
 // ============================================
 // KEEP-ALIVE PING
