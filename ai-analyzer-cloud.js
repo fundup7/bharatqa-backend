@@ -237,25 +237,24 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
       for (const modelName of models) {
         try {
           const model = genAI.getGenerativeModel({ model: modelName });
-          const prompt = `You are a QA expert. A tester recorded a mobile app test.
-          
-Video URL (for reference): ${videoUrl}
-Bug Report: ${bugDescription || 'General testing session'}
+          const prompt = `Analyze this bug report and provide a direct technical assessment.
+
 App: ${testInfo.app_name} by ${testInfo.company_name}
-Test Instructions: ${testInfo.instructions}
+Instructions: ${testInfo.instructions}
+Description: ${bugDescription || 'General testing session'}
 Device Stats: ${deviceStats || 'N/A'}
 
-Since I cannot show you the video frames, please provide a structured QA analysis template:
+Format your response exactly using These headers. Do not include any introductory text, emojis, or em-dashes.
 
-## 🔍 App Overview
-## 🐛 Issues Identified
-## ⏱️ Performance Assessment
-## 🎯 Severity
-## 💡 Top 5 Recommended Fixes
+# App Overview
+# Bug Reproduction Steps
+# Technical Hypothesis
+# Recommended Fixes
+# Severity
 
 ==== INTERNAL ADMIN VERDICT ====
-## 🤖 FINAL VERDICT: [APPROVE] or [REJECT]
-INTERNAL REASONING: Explain why you chose this verdict in 2-3 sentences max.`;
+VERDICT: [APPROVE] or [REJECT]
+REASONING: Explain the verdict in 2-3 sentences for internal administration.`;
 
           console.log(`🤖 ${modelName}: text-only analysis...`);
           const result = await model.generateContent(prompt);
@@ -302,38 +301,33 @@ INTERNAL REASONING: Explain why you chose this verdict in 2-3 sentences max.`;
             inlineData: { data: fs.readFileSync(f.path).toString('base64'), mimeType: 'image/jpeg' }
           }));
 
-          const prompt = `You are a Senior QA Engineer at BharatQA. Your mission is to provide an unbiased, technical analysis of this bug report recording.
+          const prompt = `Review the attached video frames and bug report data. Provide an unbiased technical analysis.
 
-### 🎯 TESTING CONTEXT
-- **Goal**: Verify if the tester successfully identified a functional bug while following the provided instructions.
-- **Review Area**: Cross-reference the "Test Instructions" with the tester's actions in the video.
+App: ${testInfo.app_name}
+Bug Title: ${bugDescription || 'Untitled'}
+Instructions: ${testInfo.instructions || 'Standard app exploration'}
 
-### 📋 BUG REPORT DATA
-- **Title**: ${bugDescription || 'No Title Provided'}
-- **Description**: ${bugDescription || 'No Description Provided'}
-- **Instructions**: ${testInfo.instructions || 'Follow standard app exploration.'}
+Guidelines:
+- Start directly with the headers.
+- No introductory or concluding AI remarks.
+- Do not use emojis or em-dashes.
+- Be technical and concise.
 
-### 🔍 WHAT TO REVIEW
-1. **Instruction Adherence**: Did the tester perform the steps requested?
-2. **Visual Evidence**: Is the bug described actually visible and reproducible in the recording?
-3. **App Integrity**: Does the video show the correct app, or is it a different app/home screen?
-4. **Video Quality**: Is the video clear enough to provide the company with actionable information?
+# Bug Reproduction Steps
+(Numbered list based strictly on what is visible in the frames)
 
-### 📝 ANALYSIS FORMAT
-Please provide:
-## � Bug Reproduction Steps (Match what is seen in video)
-## 🛠️ Technical Root Cause (Hypothesize based on visual cues)
-## 🎯 Severity: CRITICAL/HIGH/MEDIUM/LOW
-## 💡 Top 5 Fixes
+# Technical Root Cause
+(Hypothesize based on visual cues and app behavior)
+
+# Recommended Fixes
+(List the top 5 technical recommendations)
+
+# Severity
+(Critical, High, Medium, or Low)
 
 ==== INTERNAL ADMIN VERDICT ====
-## 🤖 FINAL VERDICT: [APPROVE] or [REJECT]
-
-### ⚖️ VERDICT CRITERIA:
-- **APPROVE** if: The video clearly shows the app, the tester followed core instructions, and a valid bug/issue is demonstrated.
-- **REJECT** if: The video is black/frozen, shows the wrong app, the tester ignored instructions, or the "bug" is clearly just user error or intentional sabotage.
-
-**INTERNAL REASONING**: Explain why you chose this verdict in 2-3 sentences max. (Admins only)`;
+VERDICT: [APPROVE] or [REJECT]
+REASONING: Explain the choice in 2-3 sentences max. (Criterion: Instruction adherence, bug visibility, and video quality)`;
           console.log(`🤖 ${modelName}: ${images.length} frames...`);
           const result = await model.generateContent([prompt, ...images]);
           analysis = result.response.text();

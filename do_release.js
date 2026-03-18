@@ -37,12 +37,12 @@ async function uploadAndRelease() {
 
         // Step 2: Create Release
         const releaseRes = await axios.post(`${BACKEND_URL}/api/app/release`, {
-            version_code: 7,
-            version_name: '1.6.0',
+            version_code: 8,
+            version_name: '1.7.0',
             apk_url: b2Url,
-            release_notes: 'Better UI, Payment Integration, New Dashboard',
+            release_notes: 'Push Notifications, Better UI, Better Performance',
             is_mandatory: true,
-            min_supported_version: 7
+            min_supported_version: 8
         }, {
             headers: {
                 'Content-Type': 'application/json',
