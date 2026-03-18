@@ -237,24 +237,31 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
       for (const modelName of models) {
         try {
           const model = genAI.getGenerativeModel({ model: modelName });
-          const prompt = `Analyze this bug report and provide a direct technical assessment.
-
-App: ${testInfo.app_name} by ${testInfo.company_name}
-Instructions: ${testInfo.instructions}
-Description: ${bugDescription || 'General testing session'}
-Device Stats: ${deviceStats || 'N/A'}
-
-Format your response exactly using These headers. Do not include any introductory text, emojis, or em-dashes.
-
-# App Overview
-# Bug Reproduction Steps
-# Technical Hypothesis
-# Recommended Fixes
-# Severity
-
+          const prompt = `Review this technical bug report and provide an objective assessment. 
+ 
+App: ${testInfo.app_name}
+Audit Context: ${testInfo.instructions}
+Description: ${bugDescription || 'General session audit'}
+Telemetry: ${deviceStats || 'N/A'}
+ 
+Rules:
+- Persona: Senior Technical Architect / Professional Security Auditor.
+- Tone: Formal, objective, zero conversational filler.
+- DO NOT use introductory phrases (e.g. "As a senior QA...", "I have reviewed...", "Hi there").
+- DO NOT use emojis, em-dashes, or standard bullet points.
+- START IMMEDIATELY with the first header.
+- The "INTERNAL ADMIN VERDICT" section MUST be at the very bottom, preceded by the delimiter.
+ 
+# FORMAL AUDIT TITLE
+(A concise, 3-7 word technical title capturing the core discovery)
+ 
+# BUG REPRODUCTION STEPS
+# TECHNICAL ROOT CAUSE [HYPOTHESIZED]
+# SEVERITY: [LOW/MEDIUM/HIGH/CRITICAL]
+ 
 ==== INTERNAL ADMIN VERDICT ====
 VERDICT: [APPROVE] or [REJECT]
-REASONING: Explain the verdict in 2-3 sentences for internal administration.`;
+REASONING: Detailed internal justification for the audit team choice in 2-3 sentences.`;
 
           console.log(`🤖 ${modelName}: text-only analysis...`);
           const result = await model.generateContent(prompt);
@@ -301,33 +308,39 @@ REASONING: Explain the verdict in 2-3 sentences for internal administration.`;
             inlineData: { data: fs.readFileSync(f.path).toString('base64'), mimeType: 'image/jpeg' }
           }));
 
-          const prompt = `Review the attached video frames and bug report data. Provide an unbiased technical analysis.
-
+          const prompt = `Review the attached video frames and bug report telemetry. Provide a strictly objective technical assessment for the development team.
+ 
 App: ${testInfo.app_name}
-Bug Title: ${bugDescription || 'Untitled'}
-Instructions: ${testInfo.instructions || 'Standard app exploration'}
+Bug Title: ${bugDescription || 'Untitled Audit Session'}
+Instructions: ${testInfo.instructions || 'Standard exploration'}
+ 
+Rules:
+- Persona: Senior Technical Architect / Professional Security Auditor.
+- Tone: Formal, objective, zero conversational filler.
+- DO NOT use introductory phrases (e.g. "As a senior QA...", "Based on the video...", "I have analyzed...").
+- DO NOT use emojis, em-dashes, or standard bullet points (use numbers or basic hyphens).
+- START IMMEDIATELY with the first header.
+- The "INTERNAL ADMIN VERDICT" section MUST be at the very bottom, preceded by the exact delimiter.
+- Format all headers exactly as shown below:
 
-Guidelines:
-- Start directly with the headers.
-- No introductory or concluding AI remarks.
-- Do not use emojis or em-dashes.
-- Be technical and concise.
-
-# Bug Reproduction Steps
-(Numbered list based strictly on what is visible in the frames)
-
-# Technical Root Cause
-(Hypothesize based on visual cues and app behavior)
-
-# Recommended Fixes
-(List the top 5 technical recommendations)
-
-# Severity
-(Critical, High, Medium, or Low)
-
+# FORMAL AUDIT TITLE
+(A concise, 3-7 word technical title capturing the core discovery)
+ 
+# BUG REPRODUCTION STEPS
+(Detailed technical steps based strictly on visual confirmation in the provided frames)
+ 
+# TECHNICAL ROOT CAUSE [HYPOTHESIZED]
+(Root cause analysis based on visual behavior and session telemetry)
+ 
+# TOP 5 FIXES
+(Prioritized technical recommendations for the engineering team)
+ 
+# SEVERITY: [LOW/MEDIUM/HIGH/CRITICAL]
+(A one-word severity designation followed by a 1-sentence justification)
+ 
 ==== INTERNAL ADMIN VERDICT ====
 VERDICT: [APPROVE] or [REJECT]
-REASONING: Explain the choice in 2-3 sentences max. (Criterion: Instruction adherence, bug visibility, and video quality)`;
+REASONING: Detailed technical explanation of the verdict strictly for BharatQA internal administration.`;
           console.log(`🤖 ${modelName}: ${images.length} frames...`);
           const result = await model.generateContent([prompt, ...images]);
           analysis = result.response.text();
@@ -338,20 +351,29 @@ REASONING: Explain the choice in 2-3 sentences max. (Criterion: Instruction adhe
     }
 
     if (analysis) {
-      // Split analysis into public and private
-      let publicReport = analysis;
+      // 1. Extract Formal Title
+      let auditTitle = "";
+      const titleMatch = publicReport.match(/# FORMAL AUDIT TITLE\n?([^\n#=]+)/i);
+      if (titleMatch && titleMatch[1]) {
+        auditTitle = titleMatch[1].trim();
+        // Remove the title from the report body to avoid duplication in display
+        publicReport = publicReport.replace(/# FORMAL AUDIT TITLE\n?[^\n#=]+/i, "").trim();
+      }
+
+      // 2. Split analysis into public and private
+      let publicReportFinal = publicReport;
       let adminContext = "";
-      if (analysis.includes("==== INTERNAL ADMIN VERDICT ====")) {
-        const parts = analysis.split("==== INTERNAL ADMIN VERDICT ====");
-        publicReport = parts[0].trim();
+      if (publicReport.includes("==== INTERNAL ADMIN VERDICT ====")) {
+        const parts = publicReport.split("==== INTERNAL ADMIN VERDICT ====");
+        publicReportFinal = parts[0].trim();
         adminContext = parts[1].trim();
       }
 
       await db.query(
-        'UPDATE bugs SET ai_analysis=$1, ai_admin_context=$2, ai_model=$3, ai_analyzed_at=NOW() WHERE id=$4',
-        [publicReport, adminContext, usedModel, bugId]
+        'UPDATE bugs SET ai_analysis=$1, ai_admin_context=$2, ai_model=$3, title=COALESCE(NULLIF($4, \'\'), title), ai_analyzed_at=NOW() WHERE id=$5',
+        [publicReportFinal, adminContext, usedModel, auditTitle, bugId]
       );
-      console.log(`✅ Bug #${bugId} analyzed & stored`);
+      console.log(`✅ Bug #${bugId} analyzed & titled: ${auditTitle || 'N/A'}`);
     }
 
     fs.rmSync(tempDir, { recursive: true, force: true });
