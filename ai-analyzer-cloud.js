@@ -351,16 +351,30 @@ REASONING: Detailed technical explanation of the verdict strictly for BharatQA i
     }
 
     if (analysis) {
-      // 1. Broad detection for Formal Title/Audit Title
+      // 0. Preliminary cleanup of old-style headers/preambles
+      publicReport = publicReport.replace(/^#?\s*ANALYSIS[:\s]*\n/i, '').trim();
+      publicReport = publicReport.replace(/^#?\s*AUDIT REPORT[:\s]*\n/i, '').trim();
+
+      // 1. Broad detection for Formal Title
       let auditTitle = "";
-      // Check for multiple variants of title headers
-      const titReg = /# (?:FORMAL AUDIT TITLE|AUDIT TITLE|TITLE)\n?([^\n#=]+)/i;
+      const titReg = /# (?:FORMAL AUDIT TITLE|AUDIT TITLE|TITLE|ISSUE|TITLE:)\n?([^\n#=]+)/i;
       const titleMatch = publicReport.match(titReg);
-      
+
       if (titleMatch && titleMatch[1]) {
         auditTitle = titleMatch[1].trim();
-        // Remove the whole title section from the report body
         publicReport = publicReport.replace(titReg, "").trim();
+      } else {
+        // Fallback: If the first line is short and looks like a title
+        // Or if it's the first bold line
+        const lines = publicReport.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        if (lines[0] && lines[0].length < 80) {
+          // If it starts with # remove it
+          auditTitle = lines[0].replace(/^[#\s\*]+/, '').replace(/[#\s\*]+$/, '').trim();
+          // Only remove it from body if we actually took it as a title
+          if (auditTitle.length > 3) {
+            publicReport = lines.slice(1).join('\n').trim();
+          }
+        }
       }
 
       // 2. Split analysis into public and private
@@ -376,7 +390,7 @@ REASONING: Detailed technical explanation of the verdict strictly for BharatQA i
         'UPDATE bugs SET ai_analysis=$1, ai_admin_context=$2, ai_model=$3, title=CASE WHEN $4 != \'\' THEN $4 ELSE title END, ai_analyzed_at=NOW() WHERE id=$5',
         [publicReportFinal, adminContext, usedModel, auditTitle, bugId]
       );
-      console.log(`✅ Bug #${bugId} analyzed & titled: ${auditTitle || 'N/A'}`);
+      console.log(`✅ Bug #${bugId} titled: ${auditTitle || 'N/A'}`);
     }
 
     fs.rmSync(tempDir, { recursive: true, force: true });
