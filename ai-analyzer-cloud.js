@@ -64,8 +64,9 @@ const db = require('./db');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const GEMINI_MODELS = [
-  'models/gemini-2.0-flash',
-  'models/gemini-1.5-flash-latest',
+  'models/gemini-2.5-flash',
+  'models/gemini-2.5-flash-lite',
+  'models/gemini-2.5-pro'
 ];
 
 // ============================================================
