@@ -402,9 +402,9 @@ REASONING: 2–3 sentences for the internal QA team. Assess whether the visual e
 // ============================================================
 
 /**
- * Extracts the bug title and splits the report into public + admin sections.
+ * Extracts the bug title, severity, and splits the report into public + admin sections.
  * @param {string} rawAnalysis - Full text returned by Gemini
- * @returns {{ title: string, publicReport: string, adminContext: string }}
+ * @returns {{ title: string, severity: string, publicReport: string, adminContext: string }}
  */
 function parseReport(rawAnalysis) {
   let text = rawAnalysis
@@ -428,6 +428,14 @@ function parseReport(rawAnalysis) {
     }
   }
 
+  // Extract severity (Case-insensitive check for LOW/MEDIUM/HIGH/CRITICAL)
+  let severity = 'LOW'; // Default
+  const severityMatch = text.match(/^#\s*SEVERITY\s*\n?\s*(LOW|MEDIUM|HIGH|CRITICAL)/im);
+  if (severityMatch) {
+    severity = severityMatch[1].toUpperCase();
+    // Don't remove it from text as it might contain the justification
+  }
+
   // Split public report from internal admin verdict
   let publicReport = text;
   let adminContext = '';
@@ -437,7 +445,7 @@ function parseReport(rawAnalysis) {
     adminContext = text.slice(splitIdx + '==== INTERNAL ADMIN VERDICT ===='.length).trim();
   }
 
-  return { title, publicReport, adminContext };
+  return { title, severity, publicReport, adminContext };
 }
 
 // ============================================================
@@ -646,7 +654,7 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
     // 5. Parse and persist the report
     // ----------------------------------------------------------
     if (analysis) {
-      const { title, publicReport, adminContext } = parseReport(analysis);
+      const { title, severity, publicReport, adminContext } = parseReport(analysis);
 
       await db.query(
         `UPDATE bugs
@@ -654,12 +662,13 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
                 ai_admin_context = $2,
                 ai_model         = $3,
                 title            = CASE WHEN $4 <> '' THEN $4 ELSE title END,
+                severity         = $5,
                 ai_analyzed_at   = NOW()
-          WHERE id = $5`,
-        [publicReport, adminContext, usedModel, title, bugId]
+          WHERE id = $6`,
+        [publicReport, adminContext, usedModel, title, severity, bugId]
       );
 
-      console.log(`✅ Bug #${bugId} analysed — title: "${title || '(none extracted)'}"`);
+      console.log(`✅ Bug #${bugId} analysed — title: "${title || '(none extracted)'}" — severity: ${severity}`);
     } else {
       console.error(`❌ All models failed for bug #${bugId}`);
     }
