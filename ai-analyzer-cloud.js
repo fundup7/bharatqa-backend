@@ -351,6 +351,7 @@ REASONING: Detailed technical explanation of the verdict strictly for BharatQA i
     }
 
     if (analysis) {
+      let publicReport = analysis;
       // 0. Preliminary cleanup of old-style headers/preambles
       publicReport = publicReport.replace(/^#?\s*ANALYSIS[:\s]*\n/i, '').trim();
       publicReport = publicReport.replace(/^#?\s*AUDIT REPORT[:\s]*\n/i, '').trim();
