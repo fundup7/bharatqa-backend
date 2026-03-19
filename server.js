@@ -213,7 +213,7 @@ app.get('/api/shared/tests/:token', async (req, res) => {
         const bugsResult = await db.query(
             `SELECT id, tester_name, bug_title, bug_description, severity, 
                     recording_url, screenshots, test_duration, device_stats, 
-                    ai_analysis, ai_model, ai_analyzed_at, created_at, status
+                    ai_analysis, ai_model, ai_analyzed_at, created_at, status, title
              FROM bugs 
              WHERE test_id = $1 AND status = 'approved' 
              ORDER BY created_at DESC`,
@@ -1429,7 +1429,7 @@ app.get('/api/tests/:id/bugs', async (req, res) => {
         const result = await db.query(
             `SELECT id, test_id, tester_name, bug_title, bug_description, severity, 
                     recording_url, screenshots, test_duration, device_stats, 
-                    ai_analysis, ai_model, ai_analyzed_at, created_at, status
+                    ai_analysis, ai_model, ai_analyzed_at, created_at, status, title
              FROM bugs 
              WHERE test_id = $1 AND status = 'approved' 
              ORDER BY created_at DESC`,
