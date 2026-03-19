@@ -335,9 +335,9 @@ Your best hypothesis for the underlying engineering cause. Reference the telemet
 # RECOMMENDED FIXES
 Numbered list of 3–5 concrete engineering recommendations, ordered by impact. Each fix should be actionable.
 
-# SEVERITY
-State exactly one severity level: LOW, MEDIUM, HIGH, or CRITICAL.
-Follow it with one sentence explaining why this severity level was chosen.
+# SEVERITY: [RATING]
+Replace [RATING] with exactly one of: LOW, MEDIUM, HIGH, or CRITICAL.
+On the next line, write exactly one sentence explaining why this severity level was chosen.
 
 ==== INTERNAL ADMIN VERDICT ====
 VERDICT: APPROVE or REJECT
@@ -387,9 +387,9 @@ Your best hypothesis for the underlying engineering cause. Cross-reference visua
 # RECOMMENDED FIXES
 Numbered list of 3–5 concrete engineering recommendations, ordered by impact. Reference the frame evidence where it supports a specific fix.
 
-# SEVERITY
-State exactly one severity level: LOW, MEDIUM, HIGH, or CRITICAL.
-Follow it with one sentence explaining why, referencing the visual or telemetry evidence.
+# SEVERITY: [RATING]
+Replace [RATING] with exactly one of: LOW, MEDIUM, HIGH, or CRITICAL.
+On the next line, write exactly one sentence explaining why, referencing visual or telemetry evidence.
 
 ==== INTERNAL ADMIN VERDICT ====
 VERDICT: APPROVE or REJECT
@@ -430,7 +430,7 @@ function parseReport(rawAnalysis) {
 
   // Extract severity (Case-insensitive check for LOW/MEDIUM/HIGH/CRITICAL)
   let severity = 'LOW'; // Default
-  const severityMatch = text.match(/^#\s*SEVERITY\s*\n?\s*(LOW|MEDIUM|HIGH|CRITICAL)/im);
+  const severityMatch = text.match(/^#\s*SEVERITY[:\s\n]*(LOW|MEDIUM|HIGH|CRITICAL)/im);
   if (severityMatch) {
     severity = severityMatch[1].toUpperCase();
     // Don't remove it from text as it might contain the justification
