@@ -302,8 +302,30 @@ app.post('/api/tests', upload.single('apk'), async (req, res) => {
 
 
 // ============================================
-// VIDEO PROXY — Serves private B2 videos
+// VIDEO PROXY — Serves private B2 videos with LOCAL DISK CACHE
 // ============================================
+const VIDEO_CACHE_DIR = path.join(require('os').tmpdir(), 'video-cache');
+if (!fs.existsSync(VIDEO_CACHE_DIR)) fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
+console.log(`📂 Video cache dir: ${VIDEO_CACHE_DIR}`);
+
+// Cleanup old cached videos every 30 minutes (evict files older than 24h)
+setInterval(() => {
+    try {
+        const files = fs.readdirSync(VIDEO_CACHE_DIR);
+        const now = Date.now();
+        let cleaned = 0;
+        for (const file of files) {
+            const fp = path.join(VIDEO_CACHE_DIR, file);
+            const stat = fs.statSync(fp);
+            if (now - stat.mtimeMs > 24 * 60 * 60 * 1000) {
+                fs.unlinkSync(fp);
+                cleaned++;
+            }
+        }
+        if (cleaned > 0) console.log(`🧹 Cache cleanup: removed ${cleaned} old videos`);
+    } catch (e) { /* ignore cleanup errors */ }
+}, 30 * 60 * 1000);
+
 app.get('/api/videos/:bugId', async (req, res) => {
     try {
         const bug = await db.query(
@@ -318,12 +340,36 @@ app.get('/api/videos/:bugId', async (req, res) => {
         const row = bug.rows[0];
 
         if (row.recording_storage === 'b2' && b2Storage) {
-            // Stream from B2 private bucket
+            // Generate a safe cache filename from the B2 key
+            const cacheKey = row.recording_path.replace(/[\/\\]/g, '_');
+            const cachePath = path.join(VIDEO_CACHE_DIR, cacheKey);
+
+            // Check if already cached on disk
+            if (fs.existsSync(cachePath) && fs.statSync(cachePath).size > 0) {
+                // CACHE HIT — serve from local disk, zero B2 bandwidth
+                const stat = fs.statSync(cachePath);
+                res.set('Content-Type', 'video/mp4');
+                res.set('Content-Length', stat.size);
+                res.set('Cache-Control', 'public, max-age=86400'); // Browser cache 24h
+                res.set('X-Cache', 'HIT');
+                return fs.createReadStream(cachePath).pipe(res);
+            }
+
+            // CACHE MISS — download from B2, save locally, then serve
             const response = await b2Storage.getVideoStream(row.recording_path);
             res.set('Content-Type', response.ContentType || 'video/mp4');
             if (response.ContentLength) {
                 res.set('Content-Length', response.ContentLength);
             }
+            res.set('Cache-Control', 'public, max-age=86400');
+            res.set('X-Cache', 'MISS');
+
+            // Tee the stream: write to cache file AND pipe to response simultaneously
+            const cacheStream = fs.createWriteStream(cachePath);
+            response.Body.on('error', () => { try { fs.unlinkSync(cachePath); } catch(e){} });
+            cacheStream.on('error', () => { /* ignore cache write errors */ });
+            
+            response.Body.pipe(cacheStream);
             response.Body.pipe(res);
         } else if (row.recording_path) {
             // Redirect to Supabase public URL

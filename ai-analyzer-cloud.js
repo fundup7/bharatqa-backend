@@ -218,11 +218,42 @@ async function analyzeBugReport(bugId, videoUrl, deviceStats, bugDescription, ap
       console.error('⚠️ Could not fetch test context:', dbErr.message);
     }
 
-    // Download video (pass API key if fetching from our own backend)
+    // Download video — check local cache first to avoid B2 bandwidth
     const videoPath = path.join(tempDir, 'video.mp4');
-    console.log('⬇️ Downloading video...');
-    await downloadFile(videoUrl, videoPath, { 'x-api-key': apiKey });
-    console.log(`📹 Video downloaded: ${videoPath}`);
+    const VIDEO_CACHE_DIR = path.join(require('os').tmpdir(), 'video-cache');
+
+    // Try to find the video in the shared disk cache
+    let cacheHit = false;
+    try {
+      const bugRow = await db.query('SELECT recording_path FROM bugs WHERE id = $1', [bugId]);
+      if (bugRow.rows[0]?.recording_path) {
+        const cacheKey = bugRow.rows[0].recording_path.replace(/[\/\\]/g, '_');
+        const cachePath = path.join(VIDEO_CACHE_DIR, cacheKey);
+        if (fs.existsSync(cachePath) && fs.statSync(cachePath).size > 0) {
+          fs.copyFileSync(cachePath, videoPath);
+          cacheHit = true;
+          console.log(`⚡ Cache HIT — skipped B2 download for bug #${bugId}`);
+        }
+      }
+    } catch (e) { /* cache lookup failed, fall through to HTTP */ }
+
+    if (!cacheHit) {
+      console.log('⬇️ Downloading video from B2...');
+      await downloadFile(videoUrl, videoPath, { 'x-api-key': apiKey });
+      console.log(`📹 Video downloaded: ${videoPath}`);
+
+      // Populate the shared cache for future requests
+      try {
+        const bugRow = await db.query('SELECT recording_path FROM bugs WHERE id = $1', [bugId]);
+        if (bugRow.rows[0]?.recording_path) {
+          if (!fs.existsSync(VIDEO_CACHE_DIR)) fs.mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
+          const cacheKey = bugRow.rows[0].recording_path.replace(/[\/\\]/g, '_');
+          const cachePath = path.join(VIDEO_CACHE_DIR, cacheKey);
+          fs.copyFileSync(videoPath, cachePath);
+          console.log(`💾 Cached video for future use`);
+        }
+      } catch (e) { /* cache save failed, not critical */ }
+    }
 
     const dur = await getDuration(videoPath);
     const frameCount = getFrameCount(dur);
