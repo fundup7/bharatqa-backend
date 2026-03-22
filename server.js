@@ -477,9 +477,9 @@ app.put('/api/auth/onboarding/:companyId', async (req, res) => {
             role, phone, website, referral_source
         } = req.body;
 
-        if (!company_name || !industry || !company_size || !role || !phone) {
+        if (!company_name) {
             return res.status(400).json({
-                error: 'Please fill all required fields'
+                error: 'Company name is required'
             });
         }
 
@@ -489,8 +489,16 @@ app.put('/api/auth/onboarding/:companyId', async (req, res) => {
         role = $4, phone = $5, website = $6, referral_source = $7,
         onboarding_complete = TRUE
       WHERE id = $8 RETURNING *`,
-            [company_name, industry, company_size, role, phone,
-                website || null, referral_source || null, companyId]
+            [
+                company_name, 
+                industry || null, 
+                company_size || null, 
+                role || null, 
+                phone || null,
+                website || null, 
+                referral_source || null, 
+                companyId
+            ]
         );
 
         if (result.rows.length === 0) {
@@ -799,26 +807,37 @@ app.put('/api/auth/company/:companyId', async (req, res) => {
             role, phone, website, referral_source
         } = req.body;
 
-        if (!company_name || !industry || !company_size || !role || !phone) {
+        if (!company_name) {
             return res.status(400).json({
-                error: 'Please fill all required fields'
+                error: 'Company name is required'
             });
         }
 
-        const phoneClean = phone.replace(/\D/g, '');
-        if (phoneClean.length < 10) {
-            return res.status(400).json({
-                error: 'Please enter a valid 10-digit phone number'
-            });
+        let phoneClean = null;
+        if (phone && phone.trim()) {
+            phoneClean = phone.replace(/\D/g, '');
+            if (phoneClean.length < 10) {
+                return res.status(400).json({
+                    error: 'Please enter a valid 10-digit phone number'
+                });
+            }
         }
 
         const result = await db.query(
             `UPDATE companies SET
-company_name = $1, industry = $2, company_size = $3,
-    role = $4, phone = $5, website = $6, referral_source = $7
-       WHERE id = $8 RETURNING * `,
-            [company_name, industry, company_size, role,
-                phoneClean, website || null, referral_source || null, companyId]
+        company_name = $1, industry = $2, company_size = $3,
+        role = $4, phone = $5, website = $6, referral_source = $7
+       WHERE id = $8 RETURNING *`,
+            [
+                company_name, 
+                industry || null, 
+                company_size || null, 
+                role || null, 
+                phoneClean, // already handled null logic above
+                website || null, 
+                referral_source || null, 
+                companyId
+            ]
         );
 
         if (result.rows.length === 0) {
