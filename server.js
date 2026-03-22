@@ -211,12 +211,15 @@ app.get('/api/shared/tests/:token', async (req, res) => {
 
         // Fetch approved bugs for this test
         const bugsResult = await db.query(
-            `SELECT id, tester_name, bug_title, bug_description, severity, 
-                    recording_url, screenshots, test_duration, device_stats, 
-                    ai_analysis, ai_model, ai_analyzed_at, created_at, status, title
-             FROM bugs 
-             WHERE test_id = $1 AND status = 'approved' 
-             ORDER BY created_at DESC`,
+            `SELECT b.id, b.tester_name, b.bug_title, b.bug_description, b.severity, 
+                    b.recording_url, b.screenshots, b.test_duration, b.device_stats, 
+                    b.ai_analysis, b.ai_model, b.ai_analyzed_at, b.created_at, b.status, b.title,
+                    t.android_version as tester_os, t.device_model as tester_device, 
+                    t.ram_gb as tester_ram, t.network_type as tester_net
+             FROM bugs b
+             LEFT JOIN testers t ON b.tester_id = t.id
+             WHERE b.test_id = $1 AND b.status = 'approved' 
+             ORDER BY b.created_at DESC`,
             [test.id]
         );
 
@@ -688,8 +691,12 @@ app.put('/api/admin/tests/:testId/budget', async (req, res) => {
 app.get('/api/admin/bugs/pending', async (req, res) => {
     try {
         const result = await db.query(
-            `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions FROM bugs b 
+            `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions,
+                    ts.android_version as tester_os, ts.device_model as tester_device, 
+                    ts.ram_gb as tester_ram, ts.network_type as tester_net
+             FROM bugs b 
              LEFT JOIN tests t ON b.test_id = t.id 
+             LEFT JOIN testers ts ON b.tester_id = ts.id
              WHERE b.status = 'pending' AND b.bug_title != 'Manual Assignment'
              ORDER BY b.created_at DESC`
         );
@@ -1427,12 +1434,15 @@ app.get('/api/tests/:id/bugs', async (req, res) => {
     try {
         // Explicitly exclude ai_admin_context for companies
         const result = await db.query(
-            `SELECT id, test_id, tester_name, bug_title, bug_description, severity, 
-                    recording_url, screenshots, test_duration, device_stats, 
-                    ai_analysis, ai_model, ai_analyzed_at, created_at, status, title
-             FROM bugs 
-             WHERE test_id = $1 AND status = 'approved' 
-             ORDER BY created_at DESC`,
+            `SELECT b.id, b.test_id, b.tester_name, b.bug_title, b.bug_description, b.severity, 
+                    b.recording_url, b.screenshots, b.test_duration, b.device_stats, 
+                    b.ai_analysis, b.ai_model, b.ai_analyzed_at, b.created_at, b.status, b.title,
+                    t.android_version as tester_os, t.device_model as tester_device, 
+                    t.ram_gb as tester_ram, t.network_type as tester_net
+             FROM bugs b
+             LEFT JOIN testers t ON b.tester_id = t.id
+             WHERE b.test_id = $1 AND b.status = 'approved' 
+             ORDER BY b.created_at DESC`,
             [req.params.id]
         );
         res.json(result.rows);
