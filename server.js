@@ -215,7 +215,9 @@ app.get('/api/shared/tests/:token', async (req, res) => {
                     b.recording_url, b.screenshots, b.test_duration, b.device_stats, 
                     b.ai_analysis, b.ai_model, b.ai_analyzed_at, b.created_at, b.status, b.title,
                     t.android_version as tester_os, t.device_model as tester_device, 
-                    t.ram_gb as tester_ram, t.network_type as tester_net
+                    t.ram_gb as tester_ram, t.network_type as tester_net,
+                    t.full_name as tester_real_name, t.city as tester_city, t.state as tester_state,
+                    t.screen_resolution as tester_res, t.device_tier as tester_tier
              FROM bugs b
              LEFT JOIN testers t ON b.tester_id = t.id
              WHERE b.test_id = $1 AND b.status = 'approved' 
@@ -693,7 +695,9 @@ app.get('/api/admin/bugs/pending', async (req, res) => {
         const result = await db.query(
             `SELECT b.*, t.app_name, t.company_name, t.instructions as test_instructions,
                     ts.android_version as tester_os, ts.device_model as tester_device, 
-                    ts.ram_gb as tester_ram, ts.network_type as tester_net
+                    ts.ram_gb as tester_ram, ts.network_type as tester_net,
+                    ts.full_name as tester_real_name, ts.city as tester_city, ts.state as tester_state,
+                    ts.screen_resolution as tester_res, ts.device_tier as tester_tier
              FROM bugs b 
              LEFT JOIN tests t ON b.test_id = t.id 
              LEFT JOIN testers ts ON b.tester_id = ts.id
@@ -1438,7 +1442,9 @@ app.get('/api/tests/:id/bugs', async (req, res) => {
                     b.recording_url, b.screenshots, b.test_duration, b.device_stats, 
                     b.ai_analysis, b.ai_model, b.ai_analyzed_at, b.created_at, b.status, b.title,
                     t.android_version as tester_os, t.device_model as tester_device, 
-                    t.ram_gb as tester_ram, t.network_type as tester_net
+                    t.ram_gb as tester_ram, t.network_type as tester_net,
+                    t.full_name as tester_real_name, t.city as tester_city, t.state as tester_state,
+                    t.screen_resolution as tester_res, t.device_tier as tester_tier
              FROM bugs b
              LEFT JOIN testers t ON b.tester_id = t.id
              WHERE b.test_id = $1 AND b.status = 'approved' 
